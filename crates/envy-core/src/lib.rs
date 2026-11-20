@@ -5,7 +5,8 @@
 //! added, and reads or writes config that contains paths and settings only.
 //!
 //! Secret values live in process memory while a file is open. They are not
-//! written to config, logs, or a side file. Callers must not log [`Entry::value`].
+//! written to config or logs. A save uses a short-lived sibling file only long
+//! enough to rename it into place. Callers must not log [`Entry::value`].
 //!
 //! Later, a CLI or an encrypted-share tool can depend on this crate directly.
 //! Those features are named in [`future`] and are not implemented.

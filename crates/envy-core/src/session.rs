@@ -1,7 +1,10 @@
-//! One open `.env` file: undo, in-place save, and external-change detection.
+//! One open `.env` file: undo, atomic save, and external-change detection.
 //!
-//! Saves truncate the destination file and write it directly. There is no
-//! temporary file, because a temp file would be a second copy of the secrets.
+//! A save writes a sibling `*.envy-tmp` file, syncs it, then renames it over
+//! the real file. A crash before the rename leaves the original intact. The
+//! sibling is removed on failure and is not an env file Envy will open.
+//! Undo and redo change the in-memory document only. The file is written when
+//! [`OpenFile::save`] runs.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -20,6 +23,8 @@ pub struct OpenFile {
     undo: Vec<EnvDocument>,
     redo: Vec<EnvDocument>,
     pub mtime: Option<SystemTime>,
+    /// Serialization last written to disk, or the text we loaded.
+    clean: String,
     /// Disk differs from the document we have. The editor should ask before
     /// replacing in-memory edits.
     pub external_change: bool,
@@ -35,9 +40,11 @@ impl OpenFile {
         let text = String::from_utf8(bytes)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "file is not valid utf-8"))?;
         let mtime = fs::metadata(&path).and_then(|meta| meta.modified()).ok();
+        let document = EnvDocument::parse(&text);
         Ok(Self {
             path,
-            document: EnvDocument::parse(&text),
+            clean: document.serialize(),
+            document,
             undo: Vec::new(),
             redo: Vec::new(),
             mtime,
@@ -56,6 +63,7 @@ impl OpenFile {
         }
         let mut open = Self {
             path,
+            clean: String::new(),
             document,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -73,6 +81,11 @@ impl OpenFile {
 
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
+    }
+
+    /// True when the document differs from the last successful load or save.
+    pub fn is_dirty(&self) -> bool {
+        self.document.serialize() != self.clean
     }
 
     /// Snapshot, run `edit`, and remember the inverse for undo.
@@ -104,9 +117,11 @@ impl OpenFile {
         true
     }
 
-    /// Write the document over the real file. Does not create a sibling temp file.
+    /// Write the document over the real file by renaming a synced sibling.
     pub fn save(&mut self) -> io::Result<()> {
-        write_in_place(&self.path, self.document.serialize().as_bytes())?;
+        let text = self.document.serialize();
+        write_atomic(&self.path, text.as_bytes())?;
+        self.clean = text;
         self.mtime = fs::metadata(&self.path)
             .and_then(|meta| meta.modified())
             .ok();
@@ -175,20 +190,82 @@ impl OpenFile {
     }
 }
 
-pub fn write_in_place(path: &Path, bytes: &[u8]) -> io::Result<()> {
+/// Sibling used for one in-flight write. Same directory as `path`, so the
+/// rename stays on one filesystem. The name ends in `.envy-tmp`, which
+/// discovery ignores.
+pub fn temp_sibling(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_else(|| "env".into());
+    name.push(".envy-tmp");
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(name),
+        _ => PathBuf::from(name),
+    }
+}
+
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
         }
     }
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(())
+    let tmp = temp_sibling(path);
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        replace_file(&tmp, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        replace_file_windows(from, to)
+    }
+    #[cfg(not(windows))]
+    {
+        fs::rename(from, to)
+    }
+}
+
+/// `MoveFileExW` replaces an existing file. `std::fs::rename` does not, on Windows.
+#[cfg(windows)]
+fn replace_file_windows(from: &Path, to: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    extern "system" {
+        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+    }
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+    let from = wide(from);
+    let to = wide(to);
+    let ok = unsafe {
+        MoveFileExW(
+            from.as_ptr(),
+            to.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -209,19 +286,28 @@ mod tests {
     }
 
     #[test]
-    fn save_undo_and_no_temp_file() {
+    fn save_replaces_the_file_and_leaves_no_temp() {
         let dir = scratch();
         let path = dir.join(".env");
         fs::write(&path, "A=1\nB=2\n").unwrap();
-        let before = fs::read_dir(&dir).unwrap().count();
         let mut open = OpenFile::load(&path).unwrap();
+        assert!(!open.is_dirty());
         open.mutate(|document| {
             document.set_value("A", "9");
         });
+        assert!(open.is_dirty());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "A=1\nB=2\n");
         open.save().unwrap();
+        assert!(!open.is_dirty());
         assert_eq!(fs::read_to_string(&path).unwrap(), "A=9\nB=2\n");
-        assert_eq!(fs::read_dir(&dir).unwrap().count(), before);
+        assert!(!temp_sibling(&path).exists());
+        let names: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from(".env")]);
         assert!(open.undo());
+        assert!(open.is_dirty());
         open.save().unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "A=1\nB=2\n");
         assert!(open.redo());

@@ -28,7 +28,7 @@ fn main() {
 
     let launch = args.into_iter().find(|arg| arg.starts_with("envy:"));
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(gpui_kit::assets::AllAssets)
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
             actions::bind(cx);
@@ -40,11 +40,15 @@ fn main() {
                 cx.new(|cx| EnvyApp::new(server, launch, window, cx))
             });
             match opened {
-                Ok((window, _)) => {
+                Ok((window, view)) => {
                     window
                         .update(cx, |_, window, cx| {
-                            window.on_window_should_close(cx, |_, cx| {
-                                cx.quit();
+                            let view = view.clone();
+                            window.on_window_should_close(cx, move |_, cx| {
+                                view.update(cx, |this, cx| {
+                                    this.save_if_dirty();
+                                    cx.quit();
+                                });
                                 true
                             });
                             window.set_window_title("Envy");

@@ -29,6 +29,7 @@ actions!(
         ReloadExternal,
         KeepMine,
         PasteBlock,
+        ShowShortcuts,
     ]
 );
 
@@ -55,7 +56,10 @@ pub fn bind(cx: &mut gpui_kit::App) {
         // `ctrl` is the shortcut modifier. In this GPUI, `cmd` is the
         // Windows/Super key, not Control.
         KeyBinding::new("ctrl-z", UndoChange, Some("Envy")),
+        KeyBinding::new("ctrl-y", RedoChange, Some("Envy")),
         KeyBinding::new("ctrl-shift-z", RedoChange, Some("Envy")),
+        KeyBinding::new("shift-/", ShowShortcuts, Some("Envy")),
+        KeyBinding::new("?", ShowShortcuts, Some("Envy")),
         KeyBinding::new("ctrl-s", Save, Some("Envy")),
         KeyBinding::new("ctrl-k", OpenPalette, Some("Envy")),
         KeyBinding::new("ctrl-k", OpenPalette, None),

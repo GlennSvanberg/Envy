@@ -104,7 +104,11 @@ pub fn is_env_filename(name: &str) -> bool {
     if !name.starts_with(".env") {
         return false;
     }
-    if name.ends_with('~') || name.ends_with(".swp") || name.ends_with(".swo") {
+    if name.ends_with('~')
+        || name.ends_with(".swp")
+        || name.ends_with(".swo")
+        || name.ends_with(".envy-tmp")
+    {
         return false;
     }
     true

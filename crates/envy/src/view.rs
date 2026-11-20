@@ -17,14 +17,16 @@ use envy_core::{
     diff, from_example, is_env_key, plan_paste, search, Config, Deeplink, EnvDocument, OpenFile,
     Project, ScanError, ThemeSetting,
 };
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Selectable, Sizable, Theme, ThemeMode};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, rgb, size, AnyWindowHandle, App, Bounds, ClipboardItem, Context, Entity, FocusHandle,
-    Focusable, KeyDownEvent, MouseButton, SharedString, Subscription, Task, TitlebarOptions,
-    Window, WindowBounds, WindowOptions,
+    div, px, rgb, size, AnyView, AnyWindowHandle, App, Bounds, ClipboardItem, Context, Entity,
+    FocusHandle, Focusable, KeyDownEvent, MouseButton, SharedString, Subscription, Task,
+    TitlebarOptions, Window, WindowBounds, WindowOptions,
 };
 
 use crate::actions::*;
@@ -59,7 +61,7 @@ enum Overlay {
     Settings,
     AddFolder,
     Paste(PastePlan),
-    Delete { node: usize, key: String },
+    Shortcuts,
 }
 
 pub struct EnvyApp {
@@ -520,15 +522,29 @@ impl EnvyApp {
         cx.notify();
     }
 
+    pub fn save_if_dirty(&mut self) {
+        if self.open.as_ref().is_some_and(|open| open.is_dirty()) {
+            self.save_open();
+        }
+    }
+
     fn save_open(&mut self) {
         let saved = match self.open.as_mut() {
             Some(open) => open.save(),
             None => return,
         };
         match saved {
-            Ok(()) => self.sync_keys(),
+            Ok(()) => {
+                self.sync_keys();
+                self.status = "Saved.".into();
+            }
             Err(err) => self.status = format!("Save failed: {err}"),
         }
+    }
+
+    fn mark_edited(&mut self) {
+        self.sync_keys();
+        self.status = "Edited. Ctrl+S saves.".into();
     }
 
     fn sync_keys(&mut self) {
@@ -644,8 +660,8 @@ impl EnvyApp {
                 self.apply_overlay_paste(window, cx);
                 return;
             }
-            Overlay::Delete { .. } => {
-                self.apply_delete(window, cx);
+            Overlay::Shortcuts => {
+                self.close_overlay(window, cx);
                 return;
             }
             Overlay::AddFolder => return,
@@ -659,6 +675,31 @@ impl EnvyApp {
             return;
         }
         self.begin_value_edit(window, cx);
+    }
+
+    fn commit_focused_field(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (tag, key_focused, key_text, value_text) = {
+            let Some(editor) = self.editor.as_ref() else {
+                return;
+            };
+            let key_focused = editor
+                .key
+                .as_ref()
+                .is_some_and(|input| input.focus_handle(cx).is_focused(window));
+            let key_text = editor
+                .key
+                .as_ref()
+                .map(|input| input.read(cx).value().to_string());
+            let value_text = editor.value.read(cx).value().to_string();
+            (editor.kind_tag(), key_focused, key_text, value_text)
+        };
+        match (tag, key_focused) {
+            (EditTag::New, true) => self.focus_value_editor(window, cx),
+            (EditTag::Rename, true) => {
+                self.commit_editor_key(key_text.unwrap_or_default(), window, cx);
+            }
+            _ => self.commit_editor(Some(value_text), window, cx),
+        }
     }
 
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -881,8 +922,7 @@ impl EnvyApp {
                 entry.set_value(value);
             }
         });
-        self.save_open();
-        self.status = "Updated.".into();
+        self.mark_edited();
     }
 
     fn write_key(&mut self, node: Option<usize>, key: String) {
@@ -911,9 +951,9 @@ impl EnvyApp {
                 entry.set_key(&key);
             }
         });
-        self.save_open();
+        self.mark_edited();
         self.jump_to_key(&key);
-        self.status = format!("Renamed to {key}.");
+        self.status = format!("Renamed to {key}. Ctrl+S saves.");
     }
 
     fn write_new(&mut self, key: String, value: String) {
@@ -936,12 +976,12 @@ impl EnvyApp {
                 document.push_entry(key.clone(), value);
             }
         });
-        self.save_open();
+        self.mark_edited();
         self.jump_to_key(&key);
         self.status = if exists {
-            format!("Updated {key}.")
+            format!("Updated {key}. Ctrl+S saves.")
         } else {
-            format!("Added {key}.")
+            format!("Added {key}. Ctrl+S saves.")
         };
     }
 
@@ -1015,40 +1055,27 @@ impl EnvyApp {
         cx.notify();
     }
 
-    fn ask_delete(&mut self, cx: &mut Context<Self>) {
+    fn ask_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(node) = self.selected_node() else {
             return;
         };
         let Some(key) = self.selected_key() else {
             return;
         };
-        self.overlay = Overlay::Delete { node, key };
-        self.status = "Enter deletes the key. Esc cancels.".into();
-        cx.notify();
-    }
-
-    fn apply_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Overlay::Delete { node, key } = &self.overlay else {
-            return;
-        };
-        let node = *node;
-        let key = key.clone();
-        self.overlay = Overlay::None;
         let Some(open) = self.open.as_mut() else {
             return;
         };
         open.mutate(|document| {
             document.remove_entry_at(node);
         });
-        self.cursor = self.cursor.saturating_sub(0);
         let len = self.entry_nodes().len();
         if len == 0 {
             self.cursor = 0;
         } else if self.cursor >= len {
             self.cursor = len - 1;
         }
-        self.save_open();
-        self.status = format!("Deleted {key}. Ctrl+Z undoes.");
+        self.mark_edited();
+        self.status = format!("Removed {key}. Ctrl+Z brings it back.");
         self.focus_self(window, cx);
         cx.notify();
     }
@@ -1062,8 +1089,12 @@ impl EnvyApp {
             cx.notify();
             return;
         }
-        self.save_open();
-        self.status = "Undone.".into();
+        self.sync_keys();
+        self.status = if self.open.as_ref().is_some_and(|open| open.is_dirty()) {
+            "Undone. Ctrl+S saves.".into()
+        } else {
+            "Undone.".into()
+        };
         cx.notify();
     }
 
@@ -1074,8 +1105,12 @@ impl EnvyApp {
         if !open.redo() {
             return;
         }
-        self.save_open();
-        self.status = "Redone.".into();
+        self.sync_keys();
+        self.status = if self.open.as_ref().is_some_and(|open| open.is_dirty()) {
+            "Redone. Ctrl+S saves.".into()
+        } else {
+            "Redone.".into()
+        };
         cx.notify();
     }
 
@@ -1411,9 +1446,9 @@ impl EnvyApp {
             return;
         };
         open.apply_paste(&plan);
-        self.save_open();
+        self.mark_edited();
         self.status = format!(
-            "Pasted {} added, {} overwritten.",
+            "Pasted {} added, {} overwritten. Ctrl+S saves.",
             plan.added(),
             plan.overwritten()
         );
@@ -1427,6 +1462,10 @@ impl EnvyApp {
             return;
         }
         match event.keystroke.key.as_str() {
+            "tab" if self.editor.is_some() => {
+                self.commit_focused_field(window, cx);
+                cx.stop_propagation();
+            }
             "escape" => {
                 self.cancel(window, cx);
                 cx.stop_propagation();
@@ -1445,10 +1484,7 @@ impl EnvyApp {
     }
 
     fn capture_enter(&self) -> bool {
-        matches!(
-            self.overlay,
-            Overlay::Palette | Overlay::Paste(_) | Overlay::Delete { .. }
-        )
+        matches!(self.overlay, Overlay::Palette | Overlay::Paste(_))
     }
 
     fn missing_names(&self) -> Vec<String> {
@@ -1610,16 +1646,12 @@ impl Render for EnvyApp {
                             .child("Envy"),
                     )
                     .child(
-                        Button::new("add-folder")
-                            .ghost()
-                            .small()
-                            .label("Add")
-                            .on_click({
-                                let entity = entity.clone();
-                                move |_, window, cx| {
-                                    entity.update(cx, |this, cx| this.open_add_folder(window, cx));
-                                }
-                            }),
+                        icon_button("add-folder", IconName::FolderPlus, "Add folder").on_click({
+                            let entity = entity.clone();
+                            move |_, window, cx| {
+                                entity.update(cx, |this, cx| this.open_add_folder(window, cx));
+                            }
+                        }),
                     ),
             );
         if project_rows.is_empty() {
@@ -1637,11 +1669,18 @@ impl Render for EnvyApp {
             let entity = entity.clone();
             let mut row = h_flex()
                 .id(SharedString::from(format!("project-{index}")))
-                .px_3()
-                .py_1()
+                .mx_2()
+                .px_2()
+                .py(px(4.))
                 .gap_2()
+                .rounded(px(6.))
                 .items_center()
                 .cursor_pointer()
+                .tooltip(hover_tip(format!(
+                    "{} · {}",
+                    project.name,
+                    project.root.display()
+                )))
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                     entity.update(cx, |this, cx| this.select_project(index, true, window, cx));
                 });
@@ -1780,11 +1819,14 @@ impl Render for EnvyApp {
             let key_for_click = key.clone();
             let mut row = h_flex()
                 .id(SharedString::from(format!("key-{node}")))
-                .px_3()
-                .h(px(28.))
-                .gap_3()
+                .mx_2()
+                .px_2()
+                .h(px(26.))
+                .gap_2()
+                .rounded(px(6.))
                 .items_center()
                 .cursor_pointer()
+                .tooltip(hover_tip(format!("{key}  ·  Enter edits, Space shows")))
                 .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                     entity.update(cx, |this, cx| {
                         this.zone = Zone::Keys;
@@ -1825,16 +1867,28 @@ impl Render for EnvyApp {
                 if let Some(editor) = &self.editor {
                     if matches!(editor.kind, EditKind::Rename) {
                         if let Some(key_input) = &editor.key {
-                            row = row.child(div().flex_1().child(Input::new(key_input).small()));
+                            row = row.child(
+                                div().flex_1().child(
+                                    Input::new(key_input)
+                                        .small()
+                                        .appearance(false)
+                                        .bordered(false),
+                                ),
+                            );
                         }
                     } else {
-                        row =
-                            row.child(div().flex_1().child(
-                                Input::new(&editor.value).small().on_paste(block_paste(
-                                    cx.entity().downgrade(),
-                                    self.focus.clone(),
-                                )),
-                            ));
+                        row = row.child(
+                            div().flex_1().child(
+                                Input::new(&editor.value)
+                                    .small()
+                                    .appearance(false)
+                                    .bordered(false)
+                                    .on_paste(block_paste(
+                                        cx.entity().downgrade(),
+                                        self.focus.clone(),
+                                    )),
+                            ),
+                        );
                     }
                 }
             } else {
@@ -1853,35 +1907,64 @@ impl Render for EnvyApp {
             }
             if selected {
                 let entity = cx.entity();
+                let reveal = entity.clone();
                 row = row.child(
-                    Button::new(SharedString::from(format!("copy-{node}")))
-                        .ghost()
-                        .xsmall()
-                        .label("Copy")
-                        .on_click(move |_, _, cx| {
-                            entity.update(cx, |this, cx| this.copy_selected(cx));
-                        }),
+                    icon_button(
+                        SharedString::from(format!("copy-{node}")),
+                        IconName::Copy,
+                        "Copy value",
+                    )
+                    .on_click(move |_, _, cx| {
+                        entity.update(cx, |this, cx| this.copy_selected(cx));
+                    }),
+                );
+                row = row.child(
+                    icon_button(
+                        SharedString::from(format!("eye-{node}")),
+                        if visible {
+                            IconName::EyeOff
+                        } else {
+                            IconName::Eye
+                        },
+                        if visible { "Hide value" } else { "Show value" },
+                    )
+                    .on_click(move |_, _, cx| {
+                        reveal.update(cx, |this, cx| this.toggle_reveal(cx));
+                    }),
                 );
             }
             table = table.child(row);
         }
         if editing_new {
             if let Some(editor) = &self.editor {
-                let mut row = h_flex().px_3().h(px(32.)).gap_2().items_center();
+                let mut row = h_flex()
+                    .mx_2()
+                    .px_2()
+                    .h(px(28.))
+                    .gap_2()
+                    .rounded(px(6.))
+                    .items_center()
+                    .bg(theme_accent);
                 let paste = block_paste(cx.entity().downgrade(), self.focus.clone());
                 if let Some(key_input) = &editor.key {
                     row = row.child(
-                        div().w(px(240.)).child(
+                        div().w(px(200.)).child(
                             Input::new(key_input)
                                 .small()
+                                .appearance(false)
+                                .bordered(false)
                                 .on_paste(block_paste(cx.entity().downgrade(), self.focus.clone())),
                         ),
                     );
                 }
                 row = row.child(
-                    div()
-                        .flex_1()
-                        .child(Input::new(&editor.value).small().on_paste(paste)),
+                    div().flex_1().child(
+                        Input::new(&editor.value)
+                            .small()
+                            .appearance(false)
+                            .bordered(false)
+                            .on_paste(paste),
+                    ),
                 );
                 table = table.child(row);
             }
@@ -1893,7 +1976,9 @@ impl Render for EnvyApp {
             .map(|open| open.path.display().to_string())
             .unwrap_or_default();
         let status = self.status.clone();
-        let hints = "j k move   enter edit   c copy   space show   n new   ctrl-k search";
+        let hints = "j k  enter  c  space  n  ctrl-k  ?";
+        let dirty = self.open.as_ref().is_some_and(|open| open.is_dirty());
+        let toolbar = self.toolbar(cx);
 
         let mut center = v_flex()
             .flex_1()
@@ -1902,6 +1987,7 @@ impl Render for EnvyApp {
             .bg(theme_bg)
             .text_color(theme_fg)
             .child(tabs)
+            .child(toolbar)
             .child(div().flex_1().min_h(px(0.)).child(table))
             .child(
                 h_flex()
@@ -1913,6 +1999,16 @@ impl Render for EnvyApp {
                     .border_color(theme_border)
                     .text_xs()
                     .text_color(theme_muted)
+                    .when(dirty, |bar| {
+                        bar.child(
+                            div()
+                                .id("unsaved-dot")
+                                .size(px(6.))
+                                .rounded(px(99.))
+                                .bg(cx.theme().warning)
+                                .tooltip(hover_tip("Unsaved changes")),
+                        )
+                    })
                     .child(div().flex_1().overflow_hidden().whitespace_nowrap().child(
                         if status.is_empty() {
                             path_label
@@ -1923,21 +2019,56 @@ impl Render for EnvyApp {
                     .child(div().child(hints)),
             );
 
-        if self.open.is_none() {
+        if self.projects.is_empty() {
+            let entity = cx.entity();
             center = v_flex()
                 .flex_1()
                 .h_full()
                 .items_center()
                 .justify_center()
+                .gap_3()
                 .bg(theme_bg)
-                .text_color(theme_muted)
-                .child("Select a project, or add a folder with Ctrl+O.")
+                .text_color(theme_fg)
+                .child(gpui_kit::component::Icon::new(IconName::FolderPlus).large())
                 .child(
                     div()
-                        .mt_2()
+                        .text_lg()
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .child("Add a folder"),
+                )
+                .child(
+                    div()
+                        .w(px(360.))
+                        .text_sm()
+                        .text_center()
+                        .text_color(theme_muted)
+                        .child(
+                            "Envy only looks in folders you add. It edits .env files where they already live, grouped by git repo.",
+                        ),
+                )
+                .child(
+                    icon_button("welcome-add", IconName::FolderPlus, "Add folder")
+                        .on_click(move |_, window, cx| {
+                            entity.update(cx, |this, cx| this.open_add_folder(window, cx));
+                        }),
+                )
+                .child(
+                    div()
                         .text_xs()
-                        .child("Files stay where they are. Envy does not copy secrets."),
+                        .text_color(theme_muted)
+                        .child("Ctrl+O"),
                 );
+        } else if self.open.is_none() {
+            center = v_flex()
+                .flex_1()
+                .h_full()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .bg(theme_bg)
+                .text_color(theme_muted)
+                .child("Select a project on the left.")
+                .child(div().text_xs().child("Files stay where they are."));
         }
 
         let mut root = h_flex()
@@ -1968,12 +2099,16 @@ impl Render for EnvyApp {
             .on_action(cx.listener(|this, _: &RevealAll, _, cx| this.toggle_show_all(cx)))
             .on_action(cx.listener(|this, _: &NewKey, window, cx| this.begin_new_key(window, cx)))
             .on_action(cx.listener(|this, _: &RenameKey, window, cx| this.begin_rename(window, cx)))
-            .on_action(cx.listener(|this, _: &DeleteKey, _, cx| this.ask_delete(cx)))
+            .on_action(cx.listener(|this, _: &DeleteKey, window, cx| this.ask_delete(window, cx)))
             .on_action(cx.listener(|this, _: &UndoChange, _, cx| this.undo(cx)))
             .on_action(cx.listener(|this, _: &RedoChange, _, cx| this.redo(cx)))
             .on_action(cx.listener(|this, _: &Save, _, cx| {
                 this.save_open();
-                this.status = "Saved.".into();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ShowShortcuts, window, cx| {
+                this.overlay = Overlay::Shortcuts;
+                this.focus_self(window, cx);
                 cx.notify();
             }))
             .on_action(
@@ -2029,7 +2164,7 @@ impl EnvyApp {
         border: impl Clone + Into<gpui_kit::Hsla>,
         danger: impl Clone + Into<gpui_kit::Hsla>,
         mono: SharedString,
-        cx: &App,
+        cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
         let _ = (bg, fg);
         let name = self
@@ -2063,59 +2198,162 @@ impl EnvyApp {
             return panel.child(div().p_3().text_color(muted).child("Nothing to compare."));
         };
         let report = diff::diff(current, other);
+        let missing = report.missing_on_left().count();
+        let entity = cx.entity();
         panel = panel.child(
-            div()
-                .px_3()
+            h_flex()
+                .px_2()
                 .py_1()
-                .text_xs()
-                .text_color(muted.clone())
-                .child("] cycles files"),
+                .gap_2()
+                .items_center()
+                .child(
+                    icon_button(
+                        "copy-missing",
+                        IconName::ArrowRightLeft,
+                        "Add keys this file is missing",
+                    )
+                    .on_click(move |_, _, cx| {
+                        entity.update(cx, |this, cx| this.add_missing_keys(cx));
+                    }),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted.clone())
+                        .child(if missing == 0 {
+                            "Nothing missing".into()
+                        } else {
+                            format!("{missing} missing")
+                        }),
+                ),
         );
         let mut body = v_flex()
             .id("diff-body")
             .flex_1()
             .overflow_y_scroll()
+            .p_1()
+            .gap(px(2.))
             .text_sm();
-        for row in &report.rows {
-            if row.kind == diff::DiffKind::Same {
-                continue;
-            }
-            let mark = match row.kind {
-                diff::DiffKind::Different => "≠",
-                diff::DiffKind::OnlyLeft => "+",
-                diff::DiffKind::OnlyRight => "missing",
-                diff::DiffKind::Same => "",
+        for (index, row) in report.rows.iter().enumerate() {
+            let (mark, tint) = match row.kind {
+                diff::DiffKind::Same => ("=", cx.theme().success.opacity(0.14)),
+                diff::DiffKind::Different => ("≠", cx.theme().warning.opacity(0.22)),
+                diff::DiffKind::OnlyLeft => ("+", cx.theme().info.opacity(0.18)),
+                diff::DiffKind::OnlyRight => ("missing", cx.theme().danger.opacity(0.2)),
             };
-            let color_danger = matches!(
-                row.kind,
-                diff::DiffKind::OnlyRight | diff::DiffKind::Different
-            );
             let left = row.left.as_deref().unwrap_or("");
             let right = row.right.as_deref().unwrap_or("");
             let visible = self.visible(&row.key);
             let detail = match row.kind {
                 diff::DiffKind::Different => format!(
-                    "{}  vs  {}",
+                    "{}   {}",
                     display_value(left, visible),
                     display_value(right, visible)
                 ),
                 diff::DiffKind::OnlyLeft => display_value(left, visible),
                 diff::DiffKind::OnlyRight => display_value(right, visible),
-                diff::DiffKind::Same => String::new(),
+                diff::DiffKind::Same => display_value(left, visible),
             };
-            let mut line = v_flex().px_3().py_1().font_family(mono.clone());
-            if color_danger {
-                line = line.text_color(danger.clone());
-            }
-            line = line
-                .child(format!("{mark}  {}", row.key))
-                .child(div().text_xs().text_color(muted.clone()).child(detail));
-            body = body.child(line);
+            let label = match row.kind {
+                diff::DiffKind::Same => "Equal",
+                diff::DiffKind::Different => "Differs",
+                diff::DiffKind::OnlyLeft => "Only in this file",
+                diff::DiffKind::OnlyRight => "Missing here",
+            };
+            body = body.child(
+                v_flex()
+                    .id(SharedString::from(format!("diff-row-{index}")))
+                    .px_2()
+                    .py(px(3.))
+                    .rounded(px(6.))
+                    .bg(tint)
+                    .font_family(mono.clone())
+                    .tooltip(hover_tip(label))
+                    .child(format!("{mark}  {}", row.key))
+                    .child(div().text_xs().text_color(muted.clone()).child(detail)),
+            );
         }
-        if !report.has_warnings() && report.only_left().next().is_none() {
-            body = body.child(div().p_3().text_color(muted).child("No differences."));
-        }
+        let _ = danger;
         panel.child(body)
+    }
+
+    fn toolbar(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
+        let save = cx.entity();
+        let diff = cx.entity();
+        let eye = cx.entity();
+        let newer = cx.entity();
+        let example = cx.entity();
+        let settings = cx.entity();
+        let search = cx.entity();
+        let show_all = self.show_all;
+        h_flex()
+            .px_2()
+            .h(px(32.))
+            .gap(px(1.))
+            .items_center()
+            .child(
+                icon_button("tb-search", IconName::Search, "Search")
+                    .tooltip_with_action("Search", &OpenPalette, Some("Envy"))
+                    .on_click(move |_, window, cx| {
+                        search.update(cx, |this, cx| this.open_palette(window, cx));
+                    }),
+            )
+            .child(
+                icon_button("tb-save", IconName::Save, "Save")
+                    .tooltip_with_action("Save", &Save, Some("Envy"))
+                    .on_click(move |_, _, cx| {
+                        save.update(cx, |this, cx| {
+                            this.save_open();
+                            cx.notify();
+                        });
+                    }),
+            )
+            .child(
+                icon_button("tb-diff", IconName::GitCompare, "Diff")
+                    .tooltip_with_action("Diff", &ToggleDiff, Some("Envy"))
+                    .on_click(move |_, _, cx| {
+                        diff.update(cx, |this, cx| this.toggle_diff(cx));
+                    }),
+            )
+            .child(
+                icon_button(
+                    "tb-eye",
+                    if show_all {
+                        IconName::EyeOff
+                    } else {
+                        IconName::Eye
+                    },
+                    if show_all {
+                        "Hide values"
+                    } else {
+                        "Show all values"
+                    },
+                )
+                .on_click(move |_, _, cx| {
+                    eye.update(cx, |this, cx| this.toggle_show_all(cx));
+                }),
+            )
+            .child(
+                icon_button("tb-new", IconName::Plus, "New key")
+                    .tooltip_with_action("New key", &NewKey, Some("Envy"))
+                    .on_click(move |_, window, cx| {
+                        newer.update(cx, |this, cx| this.begin_new_key(window, cx));
+                    }),
+            )
+            .child(
+                icon_button("tb-example", IconName::FilePlus, "New file from example").on_click(
+                    move |_, _, cx| {
+                        example.update(cx, |this, cx| this.new_from_example(cx));
+                    },
+                ),
+            )
+            .child(
+                icon_button("tb-settings", IconName::Settings, "Settings")
+                    .tooltip_with_action("Settings", &OpenSettings, Some("Envy"))
+                    .on_click(move |_, window, cx| {
+                        settings.update(cx, |this, cx| this.open_settings(window, cx));
+                    }),
+            )
     }
 
     fn overlay_view(&self, _window: &mut Window, cx: &mut Context<Self>) -> gpui_kit::Div {
@@ -2136,7 +2374,7 @@ impl EnvyApp {
             Overlay::Settings => self.settings_panel(cx),
             Overlay::AddFolder => self.folder_panel(cx),
             Overlay::Paste(plan) => self.paste_panel(plan, cx),
-            Overlay::Delete { key, .. } => self.delete_panel(key, cx),
+            Overlay::Shortcuts => self.shortcuts_panel(cx),
             Overlay::None => div(),
         };
         backdrop = backdrop.child(
@@ -2213,13 +2451,14 @@ impl EnvyApp {
                             .child(folder.display().to_string()),
                     )
                     .child(
-                        Button::new(SharedString::from(format!("rm-folder-{index}")))
-                            .ghost()
-                            .xsmall()
-                            .label("Remove")
-                            .on_click(move |_, _, cx| {
-                                entity.update(cx, |this, cx| this.remove_folder(index, cx));
-                            }),
+                        icon_button(
+                            SharedString::from(format!("rm-folder-{index}")),
+                            IconName::Trash,
+                            "Remove folder",
+                        )
+                        .on_click(move |_, _, cx| {
+                            entity.update(cx, |this, cx| this.remove_folder(index, cx));
+                        }),
                     ),
             );
         }
@@ -2246,13 +2485,15 @@ impl EnvyApp {
                     .gap_2()
                     .child(theme_button(
                         "theme-system",
-                        "System",
+                        IconName::Monitor,
+                        "Follow the system",
                         theme == ThemeSetting::System,
                         ThemeSetting::System,
                         cx,
                     ))
                     .child(theme_button(
                         "theme-light",
+                        IconName::Sun,
                         "Light",
                         theme == ThemeSetting::Light,
                         ThemeSetting::Light,
@@ -2260,6 +2501,7 @@ impl EnvyApp {
                     ))
                     .child(theme_button(
                         "theme-dark",
+                        IconName::Moon,
                         "Dark",
                         theme == ThemeSetting::Dark,
                         ThemeSetting::Dark,
@@ -2267,20 +2509,26 @@ impl EnvyApp {
                     )),
             )
             .child(
-                Button::new("clear-clip")
-                    .small()
-                    .label(if clear {
+                icon_button(
+                    "clear-clip",
+                    if clear {
+                        IconName::ClipboardCheck
+                    } else {
+                        IconName::Clipboard
+                    },
+                    if clear {
                         "Clipboard clears after 30s"
                     } else {
                         "Clipboard is kept"
-                    })
-                    .selected(clear)
-                    .on_click({
-                        let entity = entity.clone();
-                        move |_, _, cx| {
-                            entity.update(cx, |this, cx| this.toggle_clear_clipboard(cx));
-                        }
-                    }),
+                    },
+                )
+                .selected(clear)
+                .on_click({
+                    let entity = entity.clone();
+                    move |_, _, cx| {
+                        entity.update(cx, |this, cx| this.toggle_clear_clipboard(cx));
+                    }
+                }),
             )
             .child(
                 div()
@@ -2329,10 +2577,8 @@ impl EnvyApp {
         {
             let entity = cx.entity();
             panel = panel.child(
-                Button::new("browse-folder")
-                    .small()
-                    .label("Browse")
-                    .on_click(move |_, window, cx| {
+                icon_button("browse-folder", IconName::Folder, "Browse").on_click(
+                    move |_, window, cx| {
                         if let Some(path) =
                             rfd::FileDialog::new().set_title("Add folder").pick_folder()
                         {
@@ -2340,7 +2586,8 @@ impl EnvyApp {
                                 this.commit_folder(path.display().to_string(), window, cx);
                             });
                         }
-                    }),
+                    },
+                ),
             );
         }
         let _ = cx;
@@ -2391,39 +2638,153 @@ impl EnvyApp {
             .child(list)
     }
 
-    fn delete_panel(&self, key: &str, cx: &App) -> gpui_kit::Div {
+    fn add_missing_keys(&mut self, cx: &mut Context<Self>) {
+        let Some(other) = self.diff_doc.clone() else {
+            self.status = "Nothing to compare.".into();
+            cx.notify();
+            return;
+        };
+        let missing: Vec<(String, String)> = self
+            .open
+            .as_ref()
+            .map(|open| {
+                diff::diff(&open.document, &other)
+                    .rows
+                    .into_iter()
+                    .filter(|row| row.kind == diff::DiffKind::OnlyRight)
+                    .map(|row| (row.key, row.right.unwrap_or_default()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if missing.is_empty() {
+            self.status = "This file is not missing any keys.".into();
+            cx.notify();
+            return;
+        }
+        let count = missing.len();
+        let Some(open) = self.open.as_mut() else {
+            return;
+        };
+        open.mutate(|document| {
+            for (key, value) in missing {
+                document.push_entry(key, value);
+            }
+        });
+        self.mark_edited();
+        self.status = format!("Added {count} missing keys. Ctrl+S saves.");
+        cx.notify();
+    }
+
+    fn shortcuts_panel(&self, cx: &App) -> gpui_kit::Div {
+        let mid = SHORTCUTS.len().div_ceil(2);
+        let mut columns = h_flex().gap_4().items_start();
+        for range in [0..mid, mid..SHORTCUTS.len()] {
+            let mut column = v_flex().flex_1().gap(px(1.));
+            for (keys, what) in &SHORTCUTS[range] {
+                column = column.child(
+                    h_flex()
+                        .justify_between()
+                        .gap_3()
+                        .py(px(2.))
+                        .px_2()
+                        .rounded(px(6.))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().foreground)
+                                .child(*what),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .text_color(cx.theme().muted_foreground)
+                                .child(*keys),
+                        ),
+                );
+            }
+            columns = columns.child(column);
+        }
         v_flex()
-            .p_4()
+            .w(px(640.))
+            .p_3()
             .gap_2()
             .bg(cx.theme().background)
             .border_1()
             .border_color(cx.theme().border)
-            .rounded_md()
+            .rounded(px(12.))
+            .shadow_md()
             .child(
                 div()
+                    .px_2()
                     .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .child(format!("Delete {key}?")),
+                    .child("Shortcuts"),
             )
+            .child(columns)
             .child(
                 div()
-                    .text_sm()
+                    .px_2()
+                    .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child("Enter deletes it from the file. Ctrl+Z puts it back."),
+                    .child("Esc closes this."),
             )
     }
 }
 
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("j  k", "Move"),
+    ("Enter", "Edit the value in the row"),
+    ("Tab", "Commit the edit"),
+    ("Esc", "Cancel the edit"),
+    ("c", "Copy the value"),
+    ("Space", "Show or hide the value"),
+    ("a", "Show or hide every value"),
+    ("n", "New key"),
+    ("f2", "Rename the key"),
+    ("x", "Remove the key"),
+    ("Ctrl+Z", "Undo"),
+    ("Ctrl+Y", "Redo"),
+    ("Ctrl+S", "Save"),
+    ("Ctrl+K", "Search"),
+    ("Ctrl+V", "Paste KEY=value lines"),
+    ("d", "Diff"),
+    ("]", "Next file to compare"),
+    ("Ctrl+Shift+N", "New file from example"),
+    ("Ctrl+O", "Add a folder"),
+    ("Ctrl+,", "Settings"),
+    ("?", "This list"),
+];
+
 fn theme_button(
     id: &'static str,
-    label: &'static str,
+    icon: IconName,
+    tip: &'static str,
     selected: bool,
     theme: ThemeSetting,
     cx: &mut Context<EnvyApp>,
 ) -> gpui_kit::component::button::Button {
     let entity = cx.entity();
-    let mut button = Button::new(id).small().label(label).selected(selected);
-    button = button.on_click(move |_, window, cx| {
-        entity.update(cx, |this, cx| this.set_theme(theme, window, cx));
-    });
-    button
+    icon_button(id, icon, tip)
+        .selected(selected)
+        .on_click(move |_, window, cx| {
+            entity.update(cx, |this, cx| this.set_theme(theme, window, cx));
+        })
+}
+
+fn icon_button(
+    id: impl Into<SharedString>,
+    icon: IconName,
+    tip: impl Into<SharedString>,
+) -> Button {
+    Button::new(id.into())
+        .ghost()
+        .xsmall()
+        .compact()
+        .icon(icon)
+        .tooltip(tip)
+}
+
+fn hover_tip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let text = text.into();
+    move |_, cx| cx.new(|_| Tooltip::new(text.clone())).into()
 }
