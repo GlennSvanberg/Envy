@@ -1,0 +1,20 @@
+[package]
+name = "envy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Keyboard-first desktop editor for .env files"
+
+[[bin]]
+name = "envy"
+path = "src/main.rs"
+
+[dependencies]
+envy-core = { path = "../envy-core" }
+gpui-kit = "0.10.0"
+global-hotkey = "0.7"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+rfd = "0.15"

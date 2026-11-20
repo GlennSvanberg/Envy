@@ -1,0 +1,71 @@
+use gpui_kit::{actions, KeyBinding};
+
+actions!(
+    envy,
+    [
+        MoveDown,
+        MoveUp,
+        MoveLeft,
+        MoveRight,
+        SwitchZone,
+        Confirm,
+        Cancel,
+        CopyValue,
+        ToggleReveal,
+        RevealAll,
+        NewKey,
+        RenameKey,
+        DeleteKey,
+        UndoChange,
+        RedoChange,
+        Save,
+        OpenPalette,
+        Refresh,
+        ToggleDiff,
+        CycleDiff,
+        NewFromExample,
+        AddFolder,
+        OpenSettings,
+        ReloadExternal,
+        KeepMine,
+        PasteBlock,
+    ]
+);
+
+pub fn bind(cx: &mut gpui_kit::App) {
+    cx.bind_keys([
+        KeyBinding::new("j", MoveDown, Some("Envy")),
+        KeyBinding::new("down", MoveDown, Some("Envy")),
+        KeyBinding::new("k", MoveUp, Some("Envy")),
+        KeyBinding::new("up", MoveUp, Some("Envy")),
+        KeyBinding::new("h", MoveLeft, Some("Envy")),
+        KeyBinding::new("left", MoveLeft, Some("Envy")),
+        KeyBinding::new("l", MoveRight, Some("Envy")),
+        KeyBinding::new("right", MoveRight, Some("Envy")),
+        KeyBinding::new("tab", SwitchZone, Some("Envy")),
+        KeyBinding::new("enter", Confirm, Some("Envy")),
+        KeyBinding::new("c", CopyValue, Some("Envy")),
+        KeyBinding::new("space", ToggleReveal, Some("Envy")),
+        KeyBinding::new("a", RevealAll, Some("Envy")),
+        KeyBinding::new("n", NewKey, Some("Envy")),
+        KeyBinding::new("f2", RenameKey, Some("Envy")),
+        KeyBinding::new("x", DeleteKey, Some("Envy")),
+        KeyBinding::new("delete", DeleteKey, Some("Envy")),
+        KeyBinding::new("backspace", DeleteKey, Some("Envy")),
+        // `ctrl` is the shortcut modifier. In this GPUI, `cmd` is the
+        // Windows/Super key, not Control.
+        KeyBinding::new("ctrl-z", UndoChange, Some("Envy")),
+        KeyBinding::new("ctrl-shift-z", RedoChange, Some("Envy")),
+        KeyBinding::new("ctrl-s", Save, Some("Envy")),
+        KeyBinding::new("ctrl-k", OpenPalette, Some("Envy")),
+        KeyBinding::new("ctrl-k", OpenPalette, None),
+        KeyBinding::new("ctrl-r", Refresh, Some("Envy")),
+        KeyBinding::new("d", ToggleDiff, Some("Envy")),
+        KeyBinding::new("]", CycleDiff, Some("Envy")),
+        KeyBinding::new("ctrl-shift-n", NewFromExample, Some("Envy")),
+        KeyBinding::new("ctrl-o", AddFolder, Some("Envy")),
+        KeyBinding::new("ctrl-,", OpenSettings, Some("Envy")),
+        KeyBinding::new("r", ReloadExternal, Some("Envy")),
+        KeyBinding::new("ctrl-v", PasteBlock, Some("Envy")),
+    ]);
+}

@@ -1,0 +1,11 @@
+[package]
+name = "envy-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Lossless .env parsing, diff, discovery, and config for Envy. No UI."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"

@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = ["crates/envy-core", "crates/envy"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+# Small release binary. Thin LTO keeps the Windows CI build tractable
+# while still folding the GPUI runtime; symbols are stripped.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+opt-level = "z"
+panic = "abort"
+
+# Debug builds of GPUI are too slow to develop against. Optimize the
+# framework crates only; application code stays unoptimized.
+[profile.dev.package]
+gpui-pre = { opt-level = 3 }
+gpui-component = { opt-level = 3 }
+gpui-base = { opt-level = 3 }
+gpui-kit = { opt-level = 3 }
+gpui-kit-assets = { opt-level = 3 }
+gpui-pre-platform = { opt-level = 3 }
+rustybuzz = { opt-level = 3 }
+taffy = { opt-level = 3 }
+ttf-parser = { opt-level = 3 }
+
+[profile.dev.package.gpui-pre-macros]
+opt-level = 0
