@@ -1462,6 +1462,7 @@ dependencies = [
  "ignore",
  "serde",
  "toml 0.8.23",
+ "unicode-segmentation",
 ]
 
 [[package]]

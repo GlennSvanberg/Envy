@@ -24,6 +24,7 @@ pub mod scaffold;
 pub mod search;
 pub mod session;
 pub mod suggest;
+pub mod text_field;
 
 pub use columns::{
     clamp_key_column_px, clamp_sidebar_px, fitted_key_column_px, KEY_COLUMN_MAX_PX,
@@ -44,7 +45,10 @@ pub use document::{
     Node, QuoteStyle, UnreadableLine, VerbatimKind,
 };
 pub use hotkey::{Hotkey, HotkeyError};
-pub use interact::{route_value_edit, row_click, RowClick, RowTarget, ValueMotion, ValueRoute};
+pub use interact::{
+    route_cell_edit, route_value_edit, row_click, CellMotion, CellRoute, EditCell, RowClick,
+    RowTarget, ValueMotion, ValueRoute,
+};
 pub use names::{
     check_env_filename, env_name_taken, next_env_filename, normalize_env_filename, rename_env_file,
     EnvFileNameError,
@@ -58,3 +62,4 @@ pub use scaffold::from_example;
 pub use search::{search, SearchHit, SearchKind};
 pub use session::{inspect_disk, save_text, DiskNotice, OpenFile};
 pub use suggest::{common_env_keys, match_span, suggest_keys, KeySuggestion, SuggestionSource};
+pub use text_field::{first_line, TextField};

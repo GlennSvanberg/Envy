@@ -10,6 +10,7 @@ mod dotenv_highlight;
 mod hotkey_os;
 mod instance;
 mod protocol;
+mod text_input;
 mod theme;
 mod view;
 mod watch;
@@ -57,6 +58,7 @@ fn main() {
             gpui_kit::init(cx);
             theme::apply_palette(cx);
             actions::bind(cx);
+            text_input::bind(cx);
             let options = EnvyApp::window_options(cx);
             let launch = launch.clone();
             let server = server;

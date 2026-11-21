@@ -23,6 +23,81 @@ pub fn row_click(target: RowTarget) -> RowClick {
     }
 }
 
+/// Which cell of a key row is being edited.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditCell {
+    Key,
+    Value,
+}
+
+/// How the user left a single-line cell.
+///
+/// Arrows stay inside the field. These motions are the ones that leave it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CellMotion {
+    /// Tab. Key then value, then the next row's key.
+    NextCell,
+    /// Shift+Tab. Value then key, then the previous row's value.
+    PrevCell,
+    /// Enter. Same column, next row.
+    NextRow,
+    /// Esc. Does not write.
+    Cancel,
+}
+
+/// Where focus goes after a cell motion.
+///
+/// `focus_row` is `None` only for cancel. Every other motion keeps a field
+/// open, staying on the current cell when there is no neighbor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellRoute {
+    pub commit: bool,
+    pub focus_row: Option<usize>,
+    pub focus_cell: Option<EditCell>,
+}
+
+pub fn route_cell_edit(row: usize, len: usize, cell: EditCell, motion: CellMotion) -> CellRoute {
+    if len == 0 || matches!(motion, CellMotion::Cancel) {
+        return CellRoute {
+            commit: !matches!(motion, CellMotion::Cancel),
+            focus_row: None,
+            focus_cell: None,
+        };
+    }
+    let row = row.min(len - 1);
+    let (next_row, next_cell) = match (motion, cell) {
+        (CellMotion::Cancel, _) => (row, cell),
+        (CellMotion::NextCell, EditCell::Key) => (row, EditCell::Value),
+        (CellMotion::NextCell, EditCell::Value) => {
+            if row + 1 < len {
+                (row + 1, EditCell::Key)
+            } else {
+                (row, EditCell::Value)
+            }
+        }
+        (CellMotion::PrevCell, EditCell::Value) => (row, EditCell::Key),
+        (CellMotion::PrevCell, EditCell::Key) => {
+            if row > 0 {
+                (row - 1, EditCell::Value)
+            } else {
+                (row, EditCell::Key)
+            }
+        }
+        (CellMotion::NextRow, cell) => {
+            if row + 1 < len {
+                (row + 1, cell)
+            } else {
+                (row, cell)
+            }
+        }
+    };
+    CellRoute {
+        commit: true,
+        focus_row: Some(next_row),
+        focus_cell: Some(next_cell),
+    }
+}
+
 /// What the user did while a value field was open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValueMotion {
@@ -106,6 +181,52 @@ mod tests {
         let cancel = route_value_edit(2, len, ValueMotion::Cancel);
         assert!(!cancel.commit);
         assert_eq!(cancel.focus_row, None);
+    }
+
+    #[test]
+    fn tab_walks_key_then_value_then_the_next_key() {
+        let len = 3;
+        let key = route_cell_edit(0, len, EditCell::Key, CellMotion::NextCell);
+        assert!(key.commit);
+        assert_eq!(key.focus_row, Some(0));
+        assert_eq!(key.focus_cell, Some(EditCell::Value));
+
+        let value = route_cell_edit(0, len, EditCell::Value, CellMotion::NextCell);
+        assert_eq!(value.focus_row, Some(1));
+        assert_eq!(value.focus_cell, Some(EditCell::Key));
+
+        let back = route_cell_edit(1, len, EditCell::Key, CellMotion::PrevCell);
+        assert_eq!(back.focus_row, Some(0));
+        assert_eq!(back.focus_cell, Some(EditCell::Value));
+
+        let stay = route_cell_edit(2, len, EditCell::Value, CellMotion::NextCell);
+        assert_eq!(stay.focus_row, Some(2));
+        assert_eq!(stay.focus_cell, Some(EditCell::Value));
+
+        let first = route_cell_edit(0, len, EditCell::Key, CellMotion::PrevCell);
+        assert_eq!(first.focus_cell, Some(EditCell::Key));
+        assert_eq!(first.focus_row, Some(0));
+    }
+
+    #[test]
+    fn enter_stays_in_the_same_column_and_esc_drops_the_field() {
+        let next = route_cell_edit(0, 3, EditCell::Value, CellMotion::NextRow);
+        assert!(next.commit);
+        assert_eq!(next.focus_row, Some(1));
+        assert_eq!(next.focus_cell, Some(EditCell::Value));
+
+        let key_next = route_cell_edit(1, 3, EditCell::Key, CellMotion::NextRow);
+        assert_eq!(key_next.focus_row, Some(2));
+        assert_eq!(key_next.focus_cell, Some(EditCell::Key));
+
+        let stay = route_cell_edit(2, 3, EditCell::Key, CellMotion::NextRow);
+        assert_eq!(stay.focus_row, Some(2));
+        assert_eq!(stay.focus_cell, Some(EditCell::Key));
+
+        let cancel = route_cell_edit(1, 3, EditCell::Value, CellMotion::Cancel);
+        assert!(!cancel.commit);
+        assert_eq!(cancel.focus_row, None);
+        assert_eq!(cancel.focus_cell, None);
     }
 
     #[test]

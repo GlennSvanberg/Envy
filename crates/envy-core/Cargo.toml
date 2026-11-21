@@ -10,3 +10,4 @@ description = "Lossless .env parsing, diff, discovery, and config for Envy. No U
 ignore = "0.4"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+unicode-segmentation = "1"

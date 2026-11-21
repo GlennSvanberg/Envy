@@ -18,17 +18,15 @@ use envy_core::{
     abbreviate_home, attach_git_identity, cache_from_projects, check_env_filename,
     clamp_key_column_px, clamp_sidebar_px, diff, fill_key_index, fitted_key_column_px,
     from_example, host_path_style, is_env_key, load_index_cache, match_span, native_project_path,
-    next_env_filename, plan_paste, projects_from_cache, rename_env_file, route_value_edit,
+    next_env_filename, plan_paste, projects_from_cache, rename_env_file, route_cell_edit,
     row_click, save_index_cache, save_text, scan_paths, sidebar_path_chars, sidebar_rank,
-    suggest_keys, truncate_path_head, upsert_file, Config, Deeplink, EditorView, EnvDocument,
-    EnvFile, EnvFileNameError, FoundEnv, KeySuggestion, OpenFile, PathStyle, Project, RowClick,
-    RowTarget, ScanError, ThemeSetting, ValueMotion,
+    suggest_keys, truncate_path_head, upsert_file, CellMotion, Config, Deeplink, EditCell,
+    EditorView, EnvDocument, EnvFile, EnvFileNameError, FoundEnv, KeySuggestion, OpenFile,
+    PathStyle, Project, RowClick, RowTarget, ScanError, ThemeSetting,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{
-    Editor as CodeEditor, EditorState, Input, InputEvent, InputState,
-};
+use gpui_kit::component::input::{Editor as CodeEditor, EditorState, InputEvent};
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
@@ -45,6 +43,7 @@ use crate::actions::*;
 use crate::dotenv_highlight::DotenvHighlighter;
 use crate::hotkey_os;
 use crate::instance::Instance;
+use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::{
     self, Palette, COL_HEADER_H, DIFF_GUTTER_W, DIFF_HEADER_H, DIFF_KEY_COL_W, DIFF_ROW_H,
     FOOTER_H, KEY_ACTIONS_W, KEY_ROW_H, MASK_MAX_DOTS, SECTION_ROW_H, SIDEBAR_HEADER_H,
@@ -75,8 +74,8 @@ enum EditKind {
 }
 
 struct Editor {
-    key: Option<Entity<InputState>>,
-    value: Entity<InputState>,
+    key: Option<Entity<TextInput>>,
+    value: Entity<TextInput>,
     node: Option<usize>,
     kind: EditKind,
     suggestions: Vec<KeySuggestion>,
@@ -96,14 +95,14 @@ enum Overlay {
 enum FilePrompt {
     None,
     Create {
-        input: Entity<InputState>,
+        input: Entity<TextInput>,
         error: Option<String>,
         /// Fill the new file from `.env.example` instead of leaving it empty.
         from_example: bool,
     },
     Rename {
         file_ix: usize,
-        input: Entity<InputState>,
+        input: Entity<TextInput>,
         error: Option<String>,
     },
 }
@@ -147,15 +146,15 @@ pub struct EnvyApp {
     editor: Option<Editor>,
     edit_subs: Vec<Subscription>,
     overlay: Overlay,
-    folder_input: Entity<InputState>,
-    hotkey_input: Entity<InputState>,
+    folder_input: Entity<TextInput>,
+    hotkey_input: Entity<TextInput>,
     input_subs: Vec<Subscription>,
     project_scroll: ScrollHandle,
     key_scroll: ScrollHandle,
     diff_scroll: ScrollHandle,
-    project_filter: Entity<InputState>,
+    project_filter: Entity<TextInput>,
     filter_query: String,
-    key_filter: Entity<InputState>,
+    key_filter: Entity<TextInput>,
     key_query: String,
     editor_view: EditorView,
     text_editor: Entity<EditorState>,
@@ -167,8 +166,6 @@ pub struct EnvyApp {
     /// Bumped so a stale "Saved." timer cannot clear a newer message.
     saved_flash: u64,
     reload_keep_cursor: bool,
-    /// Set when a value-field key was already handled in the capture phase.
-    value_key_from_capture: bool,
     diff_open: bool,
     diff_cursor: usize,
     diff_left: Option<usize>,
@@ -242,10 +239,10 @@ impl EnvyApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let folder_input = cx.new(|cx| InputState::new(window, cx).placeholder("Folder path"));
-        let hotkey_input = cx.new(|cx| InputState::new(window, cx).placeholder("ctrl+alt+e"));
-        let project_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Find a project"));
-        let key_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Find a key"));
+        let folder_input = cx.new(|cx| TextInput::new("Folder path", cx));
+        let hotkey_input = cx.new(|cx| TextInput::new("ctrl+alt+e", cx));
+        let project_filter = cx.new(|cx| TextInput::new("Find a project", cx));
+        let key_filter = cx.new(|cx| TextInput::new("Find a key", cx));
         let text_editor = cx.new(|cx| {
             let mut state = EditorState::new(window, cx)
                 .line_number(true)
@@ -296,7 +293,6 @@ impl EnvyApp {
             text_save_gen: 0,
             saved_flash: 0,
             reload_keep_cursor: false,
-            value_key_from_capture: false,
             diff_open: false,
             diff_cursor: 0,
             diff_left: None,
@@ -457,7 +453,7 @@ impl EnvyApp {
             &self.folder_input,
             window,
             |this, state, event, _window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
+                if let TextInputEvent::Submit = event {
                     let path = state.read(cx).value().to_string();
                     this.commit_folder(path, cx);
                 }
@@ -467,22 +463,22 @@ impl EnvyApp {
             &self.project_filter,
             window,
             |this, state, event, window, cx| match event {
-                InputEvent::Change => {
+                TextInputEvent::Change => {
                     this.filter_query = state.read(cx).value().to_string();
                     this.scroll_project_into_view();
                     cx.notify();
                 }
-                InputEvent::PressEnter { .. } => {
+                TextInputEvent::Submit => {
                     this.open_filtered_project(window, cx);
                 }
-                InputEvent::Focus | InputEvent::Blur => {}
+                TextInputEvent::Focus | TextInputEvent::Blur => {}
             },
         ));
         self.input_subs.push(cx.subscribe_in(
             &self.key_filter,
             window,
             |this, state, event, window, cx| match event {
-                InputEvent::Change => {
+                TextInputEvent::Change => {
                     this.key_query = state.read(cx).value().to_string();
                     let len = this.visible_entry_nodes().len();
                     if this.cursor >= len {
@@ -490,19 +486,19 @@ impl EnvyApp {
                     }
                     cx.notify();
                 }
-                InputEvent::PressEnter { .. } => {
+                TextInputEvent::Submit => {
                     this.zone = Zone::Keys;
                     this.focus_self(window, cx);
                     cx.notify();
                 }
-                InputEvent::Focus | InputEvent::Blur => {}
+                TextInputEvent::Focus | TextInputEvent::Blur => {}
             },
         ));
         self.input_subs.push(cx.subscribe_in(
             &self.hotkey_input,
             window,
             |this, state, event, window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
+                if let TextInputEvent::Submit = event {
                     let spec = state.read(cx).value().to_string();
                     this.commit_hotkey(spec, window, cx);
                 }
@@ -1023,20 +1019,16 @@ impl EnvyApp {
             }
             return;
         }
-        if self.editing_value() {
-            self.apply_value_route(
+        if self.editor.is_some() {
+            self.apply_cell_motion(
                 if forward {
-                    ValueMotion::Next
+                    CellMotion::NextCell
                 } else {
-                    ValueMotion::Previous
+                    CellMotion::PrevCell
                 },
                 window,
                 cx,
             );
-            return;
-        }
-        if self.editor.is_some() {
-            self.commit_focused_field(window, cx);
             return;
         }
         let has_tabs = self.file_count() > 0;
@@ -1179,32 +1171,6 @@ impl EnvyApp {
             _ => self.project_filter.focus_handle(cx),
         };
         handle.is_focused(window)
-    }
-
-    fn step_out_of_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.filter_focused(Zone::Keys, window, cx) {
-            self.zone = Zone::Keys;
-            self.focus_self(window, cx);
-            cx.notify();
-            return;
-        }
-        self.zone = Zone::Projects;
-        let visible = self.visible_project_indexes();
-        let index = self
-            .project_ix
-            .filter(|index| visible.contains(index))
-            .or_else(|| visible.first().copied());
-        if let Some(index) = index {
-            if self.project_ix == Some(index) {
-                self.focus_self(window, cx);
-                cx.notify();
-            } else {
-                self.select_project(index, false, window, cx);
-            }
-        } else {
-            self.focus_self(window, cx);
-            cx.notify();
-        }
     }
 
     fn focus_keys_zone(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1913,18 +1879,6 @@ impl EnvyApp {
             .is_some_and(|input| input.focus_handle(cx).is_focused(window))
     }
 
-    fn move_suggestion(&mut self, delta: isize) {
-        let Some(editor) = self.editor.as_mut() else {
-            return;
-        };
-        let len = editor.suggestions.len();
-        if len == 0 {
-            return;
-        }
-        editor.suggestion_ix =
-            (editor.suggestion_ix as isize + delta).rem_euclid(len as isize) as usize;
-    }
-
     fn accept_suggestion(
         &mut self,
         index: usize,
@@ -2129,43 +2083,6 @@ impl EnvyApp {
         }
     }
 
-    fn commit_focused_field(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.key_editor_focused(window, cx) {
-            if let Some(ix) = self
-                .editor
-                .as_ref()
-                .filter(|editor| editor.suggestions_open && !editor.suggestions.is_empty())
-                .map(|editor| editor.suggestion_ix)
-            {
-                if self.accept_suggestion(ix, window, cx) {
-                    return;
-                }
-            }
-        }
-        let (tag, key_focused, key_text, value_text) = {
-            let Some(editor) = self.editor.as_ref() else {
-                return;
-            };
-            let key_focused = editor
-                .key
-                .as_ref()
-                .is_some_and(|input| input.focus_handle(cx).is_focused(window));
-            let key_text = editor
-                .key
-                .as_ref()
-                .map(|input| input.read(cx).value().to_string());
-            let value_text = editor.value.read(cx).value().to_string();
-            (editor.kind_tag(), key_focused, key_text, value_text)
-        };
-        match (tag, key_focused) {
-            (EditTag::New, true) => self.hold_value_editor(true, window, cx),
-            (EditTag::Rename, true) => {
-                self.commit_editor_key(key_text.unwrap_or_default(), window, cx);
-            }
-            _ => self.commit_editor(Some(value_text), true, window, cx),
-        }
-    }
-
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !matches!(self.overlay, Overlay::None) {
             self.close_overlay(window, cx);
@@ -2177,8 +2094,8 @@ impl EnvyApp {
             cx.notify();
             return;
         }
-        if self.editing_value() {
-            self.apply_value_route(ValueMotion::Cancel, window, cx);
+        if self.editor.is_some() && self.zone == Zone::Keys {
+            self.apply_cell_motion(CellMotion::Cancel, window, cx);
             return;
         }
         if self.editor.is_some() {
@@ -2282,32 +2199,93 @@ impl EnvyApp {
         self.key_scroll.scroll_to_bottom();
     }
 
-    fn editing_value(&self) -> bool {
-        self.editor
-            .as_ref()
-            .is_some_and(|editor| matches!(editor.kind, EditKind::Value))
+    fn editing_cell(&self) -> Option<EditCell> {
+        match self.editor.as_ref().map(|editor| editor.kind_tag()) {
+            Some(EditTag::Value) => Some(EditCell::Value),
+            Some(EditTag::Rename) => Some(EditCell::Key),
+            Some(EditTag::New) | None => None,
+        }
     }
 
-    fn apply_value_route(
+    fn apply_cell_motion(
         &mut self,
-        motion: ValueMotion,
+        motion: CellMotion,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .editor
+            .as_ref()
+            .is_some_and(|editor| matches!(editor.kind, EditKind::New))
+        {
+            self.apply_new_row_motion(motion, window, cx);
+            return;
+        }
+        let Some(cell) = self.editing_cell() else {
+            return;
+        };
         let len = self.visible_entry_nodes().len();
-        let route = route_value_edit(self.cursor, len, motion);
+        let route = route_cell_edit(self.cursor, len, cell, motion);
         if route.commit {
             self.commit_editor(None, false, window, cx);
         } else {
             self.close_editor();
         }
-        if let Some(row) = route.focus_row {
+        if let (Some(row), Some(cell)) = (route.focus_row, route.focus_cell) {
             self.cursor = row.min(len.saturating_sub(1));
             self.zone = Zone::Keys;
-            self.begin_value_edit(window, cx);
+            match cell {
+                EditCell::Key => self.begin_rename(window, cx),
+                EditCell::Value => self.begin_value_edit(window, cx),
+            }
         } else {
             self.focus_self(window, cx);
             cx.notify();
+        }
+    }
+
+    fn apply_new_row_motion(
+        &mut self,
+        motion: CellMotion,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key_focused = self.key_editor_focused(window, cx);
+        match motion {
+            CellMotion::Cancel => {
+                self.close_editor();
+                self.focus_self(window, cx);
+                cx.notify();
+            }
+            CellMotion::PrevCell if !key_focused => self.hold_key_editor(true, window, cx),
+            CellMotion::PrevCell => self.hold_key_editor(false, window, cx),
+            CellMotion::NextCell | CellMotion::NextRow if key_focused => {
+                self.hold_value_editor(true, window, cx);
+            }
+            CellMotion::NextCell | CellMotion::NextRow => {
+                let key = self
+                    .editor
+                    .as_ref()
+                    .and_then(|editor| editor.key.as_ref())
+                    .map(|input| input.read(cx).value().trim().to_string())
+                    .unwrap_or_default();
+                if !is_env_key(&key) {
+                    self.status = "Keys start with a letter or underscore.".into();
+                    self.hold_key_editor(false, window, cx);
+                    cx.notify();
+                    return;
+                }
+                self.commit_editor(None, false, window, cx);
+                let len = self.visible_entry_nodes().len();
+                if len > 0 {
+                    self.cursor = len - 1;
+                    self.zone = Zone::Keys;
+                    self.begin_value_edit(window, cx);
+                } else {
+                    self.focus_self(window, cx);
+                    cx.notify();
+                }
+            }
         }
     }
 
@@ -2371,10 +2349,6 @@ impl EnvyApp {
                 RowTarget::Value => self.hold_value_editor(false, window, cx),
                 RowTarget::KeyName => self.hold_key_editor(false, window, cx),
             }
-            return;
-        }
-        if matches!(target, RowTarget::Value) && self.editing_value() {
-            self.apply_value_route(ValueMotion::To(row_ix), window, cx);
             return;
         }
         self.cursor = row_ix;
@@ -2461,62 +2435,20 @@ impl EnvyApp {
     ) {
         self.close_editor();
         let initial_query = key.clone().unwrap_or_default();
-        let key_input = key.map(|text| {
-            cx.new(|cx| {
-                InputState::new(window, cx)
-                    .default_value(text)
-                    .placeholder("KEY")
-            })
-        });
+        let key_input = key.map(|text| cx.new(|cx| TextInput::new("KEY", cx).with_text(text)));
         let value_text = value.unwrap_or_default();
-        let value_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(value_text)
-                .placeholder("value")
-        });
+        let value_input = cx.new(|cx| TextInput::new("value", cx).with_text(value_text));
         if let Some(key_input) = &key_input {
-            self.edit_subs.push(cx.subscribe_in(
-                key_input,
-                window,
-                |this, input, event, window, cx| match event {
-                    InputEvent::Change => {
+            self.edit_subs.push(
+                cx.subscribe_in(key_input, window, |this, input, event, _, cx| {
+                    if let TextInputEvent::Change = event {
                         let query = input.read(cx).value().to_string();
                         this.refresh_editor_suggestions(&query);
                         cx.notify();
                     }
-                    InputEvent::PressEnter { .. } => {
-                        let rename = matches!(
-                            this.editor.as_ref().map(|editor| editor.kind_tag()),
-                            Some(EditTag::Rename)
-                        );
-                        if rename {
-                            let key = input.read(cx).value().to_string();
-                            this.commit_editor_key(key, window, cx);
-                        } else {
-                            this.hold_value_editor(true, window, cx);
-                        }
-                    }
-                    InputEvent::Focus | InputEvent::Blur => {}
-                },
-            ));
+                }),
+            );
         }
-        self.edit_subs.push(cx.subscribe_in(
-            &value_input,
-            window,
-            |this, state, event, window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
-                    if this.editing_value() {
-                        if this.value_key_from_capture {
-                            return;
-                        }
-                        this.apply_value_route(ValueMotion::Next, window, cx);
-                        return;
-                    }
-                    let text = state.read(cx).value().to_string();
-                    this.commit_editor(Some(text), true, window, cx);
-                }
-            },
-        ));
         let focus_key = key_input.is_some() && !matches!(kind, EditKind::Value);
         self.editor = Some(Editor {
             key: key_input,
@@ -3104,7 +3036,7 @@ impl EnvyApp {
             })
     }
 
-    fn file_prompt_input(&self) -> Option<&Entity<InputState>> {
+    fn file_prompt_input(&self) -> Option<&Entity<TextInput>> {
         match &self.file_prompt {
             FilePrompt::Create { input, .. } | FilePrompt::Rename { input, .. } => Some(input),
             FilePrompt::None => None,
@@ -3167,12 +3099,12 @@ impl EnvyApp {
         self.file_prompt_sub =
             Some(
                 cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
-                    InputEvent::PressEnter { .. } => this.commit_file_prompt(window, cx),
-                    InputEvent::Change => {
+                    TextInputEvent::Submit => this.commit_file_prompt(window, cx),
+                    TextInputEvent::Change => {
                         this.clear_file_prompt_error();
                         cx.notify();
                     }
-                    InputEvent::Focus | InputEvent::Blur => {}
+                    TextInputEvent::Focus | TextInputEvent::Blur => {}
                 }),
             );
         self.file_prompt = prompt;
@@ -3203,11 +3135,7 @@ impl EnvyApp {
             self.commit_editor(None, false, window, cx);
         }
         let name = next_env_filename(&self.current_file_names());
-        let input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(name)
-                .placeholder("File name")
-        });
+        let input = cx.new(|cx| TextInput::new("File name", cx).with_text(name));
         self.open_file_prompt(
             FilePrompt::Create {
                 input,
@@ -3231,11 +3159,7 @@ impl EnvyApp {
         if self.editor.is_some() {
             self.commit_editor(None, false, window, cx);
         }
-        let input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(name)
-                .placeholder("File name")
-        });
+        let input = cx.new(|cx| TextInput::new("File name", cx).with_text(name));
         self.open_file_prompt(
             FilePrompt::Rename {
                 file_ix,
@@ -3512,7 +3436,6 @@ impl EnvyApp {
     }
 
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        self.value_key_from_capture = false;
         let mods = &event.keystroke.modifiers;
         let key = event.keystroke.key.as_str();
         if mods.control && !mods.alt && !mods.platform && matches!(self.overlay, Overlay::None) {
@@ -3536,66 +3459,18 @@ impl EnvyApp {
         if mods.control || mods.alt || mods.platform {
             return;
         }
-        let suggest_active = self.key_editor_focused(window, cx)
-            && self
-                .editor
-                .as_ref()
-                .is_some_and(|editor| editor.suggestions_open && !editor.suggestions.is_empty());
-        if suggest_active {
-            match key {
-                "down" => {
-                    self.move_suggestion(1);
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    cx.notify();
-                    return;
-                }
-                "up" => {
-                    self.move_suggestion(-1);
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    cx.notify();
-                    return;
-                }
-                "tab" | "enter" => {
-                    let ix = self
-                        .editor
-                        .as_ref()
-                        .map(|editor| editor.suggestion_ix)
-                        .unwrap_or(0);
-                    if self.accept_suggestion(ix, window, cx) {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                        return;
-                    }
-                }
-                "escape" => {
-                    if let Some(editor) = self.editor.as_mut() {
-                        editor.suggestions_open = false;
-                    }
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    cx.notify();
-                    return;
-                }
-                _ => {}
-            }
-        }
-        if self.editing_value()
+        if self.editor.is_some()
             && matches!(self.overlay, Overlay::None)
-            && matches!(key, "tab" | "enter" | "up" | "down")
+            && matches!(key, "tab" | "enter")
         {
             let motion = match key {
-                "up" => Some(ValueMotion::Previous),
-                "down" => Some(ValueMotion::Next),
-                "tab" if mods.shift => Some(ValueMotion::Previous),
-                "tab" => Some(ValueMotion::Next),
-                "enter" if !mods.shift => Some(ValueMotion::Next),
+                "tab" if mods.shift => Some(CellMotion::PrevCell),
+                "tab" => Some(CellMotion::NextCell),
+                "enter" if !mods.shift => Some(CellMotion::NextRow),
                 _ => None,
             };
             if let Some(motion) = motion {
-                self.value_key_from_capture = true;
-                self.apply_value_route(motion, window, cx);
+                self.apply_cell_motion(motion, window, cx);
                 window.prevent_default();
                 cx.stop_propagation();
                 return;
@@ -3607,27 +3482,12 @@ impl EnvyApp {
                 window.prevent_default();
                 cx.stop_propagation();
             }
-            "tab" if self.editor.is_some() => {
-                self.commit_focused_field(window, cx);
-                window.prevent_default();
-                cx.stop_propagation();
-            }
             "tab"
                 if matches!(self.overlay, Overlay::None)
                     && (self.filter_focused(Zone::Projects, window, cx)
                         || self.filter_focused(Zone::Keys, window, cx)) =>
             {
                 self.switch_zone(!mods.shift, window, cx);
-                window.prevent_default();
-                cx.stop_propagation();
-            }
-            "down"
-                if self.editor.is_none()
-                    && matches!(self.overlay, Overlay::None)
-                    && (self.filter_focused(Zone::Projects, window, cx)
-                        || self.filter_focused(Zone::Keys, window, cx)) =>
-            {
-                self.step_out_of_search(window, cx);
                 window.prevent_default();
                 cx.stop_propagation();
             }
@@ -3743,24 +3603,6 @@ fn display_branch(branch: &str) -> Option<&str> {
     }
 }
 
-fn block_paste(
-    entity: gpui_kit::WeakEntity<EnvyApp>,
-    focus: FocusHandle,
-) -> impl Fn(&gpui_kit::ClipboardItem, &mut Window, &mut App) -> bool + 'static {
-    move |item, window, cx| {
-        let text = item.text();
-        let handled = entity
-            .update(cx, |this, _cx| {
-                text.map(|text| this.stage_paste(text)).unwrap_or(false)
-            })
-            .unwrap_or(false);
-        if handled {
-            window.focus(&focus, cx);
-        }
-        handled
-    }
-}
-
 fn write_entries(document: &mut EnvDocument, entries: &[(String, String, bool)]) {
     for (key, value, disabled) in entries {
         document.upsert_entry(key.clone(), value.clone(), *disabled);
@@ -3798,10 +3640,32 @@ impl Focusable for EnvyApp {
     }
 }
 
+impl EnvyApp {
+    fn tint_fields(&self, accent: gpui_kit::Hsla, cx: &mut Context<Self>) {
+        let mut paint = |input: &Entity<TextInput>| {
+            input.update(cx, |field, _| field.set_accent(accent));
+        };
+        paint(&self.folder_input);
+        paint(&self.hotkey_input);
+        paint(&self.project_filter);
+        paint(&self.key_filter);
+        if let Some(editor) = &self.editor {
+            if let Some(key) = &editor.key {
+                paint(key);
+            }
+            paint(&editor.value);
+        }
+        if let Some(input) = self.file_prompt_input() {
+            paint(input);
+        }
+    }
+}
+
 impl Render for EnvyApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_text_editor_if_needed(window, cx);
         let p = Palette::for_mode(cx.theme().mode.is_dark());
+        self.tint_fields(p.accent, cx);
         let mono = cx.theme().mono_font_family.clone();
         let ui_font = cx.theme().font_family.clone();
 
@@ -4215,16 +4079,16 @@ impl EnvyApp {
                     ),
             );
 
-        let search_box = div().px(px(8.)).pb(px(8.)).flex_shrink_0().child(
-            Input::new(&self.project_filter)
-                .small()
-                .cleanable(true)
-                .prefix(
-                    Icon::new(IconName::Search)
-                        .size(px(13.))
-                        .text_color(p.fg_tertiary),
-                ),
-        );
+        let search_box = div()
+            .px(px(8.))
+            .pb(px(8.))
+            .flex_shrink_0()
+            .child(search_field(
+                &self.project_filter,
+                "clear-project-filter",
+                p,
+                cx,
+            ));
 
         let mut project_list = v_flex()
             .id("project-list")
@@ -4797,15 +4661,12 @@ impl EnvyApp {
                 .gap(px(8.))
                 .flex_1()
                 .min_w(px(0.))
-                .child(
-                    div().w(px(220.)).flex_shrink_0().child(
-                        Input::new(&self.key_filter).small().cleanable(true).prefix(
-                            Icon::new(IconName::Search)
-                                .size(px(13.))
-                                .text_color(p.fg_tertiary),
-                        ),
-                    ),
-                )
+                .child(div().w(px(220.)).flex_shrink_0().child(search_field(
+                    &self.key_filter,
+                    "clear-key-filter",
+                    p,
+                    cx,
+                )))
                 .child(
                     div()
                         .text_size(px(12.))
@@ -5252,8 +5113,19 @@ impl EnvyApp {
                         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                             click_entity.update(cx, |this, cx| {
                                 this.zone = Zone::Keys;
-                                this.cursor = row_ix;
-                                this.focus_self(window, cx);
+                                let editing_this = this
+                                    .editor
+                                    .as_ref()
+                                    .is_some_and(|editor| editor.node == Some(node));
+                                if editing_this {
+                                    this.cursor = row_ix;
+                                } else {
+                                    if this.editor.is_some() {
+                                        this.commit_editor(None, false, window, cx);
+                                    }
+                                    this.cursor = row_ix;
+                                    this.focus_self(window, cx);
+                                }
                                 cx.notify();
                             });
                         });
@@ -5345,7 +5217,7 @@ impl EnvyApp {
                                 .flex_shrink_0()
                                 .pr(px(12.))
                                 .font_family(mono.clone())
-                                .child(Input::new(key_input).small())
+                                .child(cell_field(key_input))
                                 .into_any_element()
                         } else {
                             div().w(key_w).flex_shrink_0().into_any_element()
@@ -5413,10 +5285,7 @@ impl EnvyApp {
                                 .min_w(px(0.))
                                 .pr(px(8.))
                                 .font_family(mono.clone())
-                                .child(Input::new(&editor.value).small().on_paste(block_paste(
-                                    cx.entity().downgrade(),
-                                    self.focus.clone(),
-                                )))
+                                .child(cell_field(&editor.value))
                                 .into_any_element()
                         } else {
                             div().flex_1().into_any_element()
@@ -5546,28 +5415,26 @@ impl EnvyApp {
                     .rounded(px(6.))
                     .items_center()
                     .bg(p.bg_selected_accent);
-                let paste = block_paste(cx.entity().downgrade(), self.focus.clone());
                 if let Some(key_input) = &editor.key {
                     row = row.child(
                         div()
                             .w(key_w)
+                            .h(px(26.))
                             .flex_shrink_0()
                             .pr(px(12.))
                             .font_family(mono.clone())
-                            .child(Input::new(key_input).small().on_paste(block_paste(
-                                cx.entity().downgrade(),
-                                self.focus.clone(),
-                            ))),
+                            .child(cell_field(key_input)),
                     );
                 }
                 row = row
                     .child(
                         div()
                             .flex_1()
+                            .h(px(26.))
                             .min_w(px(0.))
                             .pr(px(8.))
                             .font_family(mono.clone())
-                            .child(Input::new(&editor.value).small().on_paste(paste)),
+                            .child(cell_field(&editor.value)),
                     )
                     .child(
                         div()
@@ -5996,11 +5863,11 @@ impl EnvyApp {
                 ("]", "Other file"),
                 ("Esc", "Close"),
             ]
-        } else if self.editing_value() {
+        } else if self.editor.is_some() {
             &[
-                ("Tab", "Next value"),
-                ("Shift+Tab", "Previous"),
-                ("Enter", "Next value"),
+                ("Tab", "Next cell"),
+                ("Shift+Tab", "Previous cell"),
+                ("Enter", "Next row"),
                 ("Esc", "Cancel"),
             ]
         } else if self.editor_view == EditorView::Text {
@@ -6768,7 +6635,7 @@ impl EnvyApp {
                         v_flex()
                             .gap(px(6.))
                             .child(setting_label("Global hotkey", p))
-                            .child(Input::new(&self.hotkey_input).small()),
+                            .child(lined_field(&self.hotkey_input, p)),
                     )
                     .child(
                         v_flex()
@@ -6831,7 +6698,7 @@ impl EnvyApp {
                             .text_color(p.fg_secondary)
                             .child("Enter a directory path to list its .env files."),
                     )
-                    .child(Input::new(&self.folder_input).small())
+                    .child(lined_field(&self.folder_input, p))
                     .child(
                         h_flex().justify_end().gap(px(8.)).child(
                             Button::new("browse-folder")
@@ -7274,10 +7141,10 @@ impl EnvyApp {
 }
 
 const SHORTCUTS: &[(&str, &str)] = &[
-    ("↑  ↓", "Move in this area"),
-    ("Enter", "Next value, or open the project"),
-    ("Tab", "Next value, or the next area"),
-    ("Shift+Tab", "Previous value, or the previous area"),
+    ("↑  ↓", "Move. In a field, start or end"),
+    ("Enter", "Next row, or open the project"),
+    ("Tab", "Key, value, then the next key"),
+    ("Shift+Tab", "Previous cell, or the previous area"),
     ("←", "Back to the project list"),
     ("←  →", "Move across file tabs"),
     ("Ctrl+Tab", "Next file"),
@@ -7687,20 +7554,83 @@ fn sidebar_section(label: &'static str, divider: bool, p: Palette) -> gpui_kit::
         )
 }
 
-fn file_name_field(input: &Entity<InputState>, p: Palette, mono: SharedString) -> gpui_kit::Div {
+fn file_name_field(input: &Entity<TextInput>, p: Palette, mono: SharedString) -> gpui_kit::Div {
     div()
         .w(px(168.))
         .h(px(28.))
         .mb(px(4.))
+        .px(px(8.))
         .flex_shrink_0()
         .font_family(mono)
+        .rounded(px(6.))
+        .border_1()
+        .border_color(p.accent_ring)
+        .bg(p.bg_surface)
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(input.clone())
+}
+
+fn cell_field(input: &Entity<TextInput>) -> gpui_kit::Div {
+    div().h(px(26.)).w_full().min_w(px(0.)).child(input.clone())
+}
+
+fn lined_field(input: &Entity<TextInput>, p: Palette) -> gpui_kit::Div {
+    div()
+        .h(px(28.))
+        .w_full()
+        .min_w(px(0.))
+        .px(px(8.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(p.border_control)
+        .bg(p.bg_surface)
+        .child(input.clone())
+}
+
+fn search_field(
+    input: &Entity<TextInput>,
+    clear_id: &'static str,
+    p: Palette,
+    cx: &mut Context<EnvyApp>,
+) -> gpui_kit::Div {
+    let empty = input.read(cx).is_empty();
+    let clear_input = input.clone();
+    h_flex()
+        .h(px(28.))
+        .w_full()
+        .px(px(8.))
+        .gap(px(6.))
+        .items_center()
+        .rounded(px(6.))
+        .border_1()
+        .border_color(p.border_control)
+        .bg(p.bg_surface)
         .child(
-            Input::new(input)
-                .small()
-                .appearance(false)
-                .border_color(p.accent_ring),
+            Icon::new(IconName::Search)
+                .size(px(13.))
+                .text_color(p.fg_tertiary),
         )
+        .child(div().flex_1().h_full().min_w(px(0.)).child(input.clone()))
+        .when(!empty, |row| {
+            row.child(
+                div()
+                    .id(clear_id)
+                    .w(px(16.))
+                    .h(px(16.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .text_color(p.fg_tertiary)
+                    .hover(|style| style.text_color(p.fg_primary))
+                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                        cx.stop_propagation();
+                        clear_input.update(cx, |input, cx| input.set_value("", window, cx));
+                        window.focus(&clear_input.focus_handle(cx), cx);
+                    })
+                    .child(Icon::new(IconName::X).size(px(12.))),
+            )
+        })
 }
 
 fn toolbar_icon_button(

@@ -32,8 +32,8 @@ Press `?` for the same list inside the window.
 
 | Key | Action |
 | --- | --- |
-| `↑` `↓` | Move. Down from a search field enters its list |
-| `Enter` | Open the project, open the tab, or edit the value |
+| `↑` `↓` | Move between rows. Inside a field, they move to the start or end of the text |
+| `Enter` | Open the project or tab. In a cell, commit and open the next row |
 | `Tab` `Shift+Tab` | Next / previous area: projects, file tabs, keys |
 | `←` | Back to the project list. In the file tabs, the previous tab |
 | `→` | Next area, or the next tab |
@@ -48,9 +48,9 @@ Press `?` for the same list inside the window.
 | `n` | New key |
 | `F2` | Rename the key |
 | `x` `Delete` `Backspace` | Remove the key |
-| `Ctrl+Z` | Undo |
+| `Ctrl+Z` | Undo. Inside a field, this undoes that field |
 | `Ctrl+Y` or `Ctrl+Shift+Z` | Redo |
-| `Tab` / `Shift+Tab` | Next or previous value, while a value is open |
+| `Tab` / `Shift+Tab` | Next or previous cell: key, then value, then the next key |
 | `Ctrl+V` | Paste `KEY=value` lines |
 | `Ctrl+Shift+N` | New file from the example |
 | `Ctrl+O` | Add a folder |

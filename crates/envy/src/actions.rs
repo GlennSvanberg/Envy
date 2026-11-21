@@ -42,7 +42,8 @@ actions!(
 pub fn bind(cx: &mut gpui_kit::App) {
     // Letter and editing keys stay out of a text field. The field's context is
     // `Input`, which sits above `Envy` while it is focused.
-    let list = Some("Envy && !Input");
+    // `Input` is the plain-text editor. `EnvyText` is every single-line field.
+    let list = Some("Envy && !Input && !EnvyText");
     cx.bind_keys([
         KeyBinding::new("j", MoveDown, list),
         KeyBinding::new("down", MoveDown, list),
