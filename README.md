@@ -1,5 +1,10 @@
 # Envy
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/icon/envy-readme-header-dark.png">
+  <img alt="Envy — a fast, keyboard-driven .env editor" src="assets/icon/envy-readme-header-light.png" width="1280">
+</picture>
+
 Envy is a fast, keyboard-first editor for `.env` files. It edits the files where they already live, and only inside folders you add. Files are grouped by the git repository they belong to.
 
 The window is [GPUI](https://github.com/zed-industries/zed) through [gpui-kit](https://github.com/longbridge/gpui-component) 0.10. Parsing, discovery, diff, and file IO live in `envy-core`, so later tools can share one model of a `.env` file.
@@ -8,7 +13,7 @@ The window is [GPUI](https://github.com/zed-industries/zed) through [gpui-kit](h
 
 ## Features
 
-- Add folders yourself. Envy walks them, skips dependency directories, and groups `.env*` files by git repo (remote name, otherwise the folder) and shows the branch.
+- Add folders yourself. Envy lists `.env`, `.env.*`, and `*.env` files as it finds them, skips dependency directories, and groups the files by git repo (remote name, otherwise the folder) and shows the branch. The list is remembered, so the next launch shows it at once and then refreshes.
 - Lossless editing. Comments, blank lines, quoting, `export`, and multiline values stay as they were. Only the keys you change are rewritten.
 - Edit in the row. Enter starts an edit, Esc cancels, Enter or Tab commits. New keys, rename, and paste all stay in the table.
 - Undo and redo (`Ctrl+Z`, `Ctrl+Y` or `Ctrl+Shift+Z`) apply to the open buffer. `Ctrl+S` writes the file. Switching files or closing the window also writes unsaved edits.

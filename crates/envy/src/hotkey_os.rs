@@ -39,7 +39,7 @@ pub fn request(spec: String) -> Receiver<Result<(), String>> {
         tx => {
             if tx.send(Command::Replace(spec, reply_tx)).is_err() {
                 let (fallback_tx, fallback_rx) = mpsc::channel();
-                let _ = fallback_tx.send(Err("Hotkey thread stopped.".into()));
+                let _ = fallback_tx.send(Err("Couldn't change the hotkey.".into()));
                 return fallback_rx;
             }
         }

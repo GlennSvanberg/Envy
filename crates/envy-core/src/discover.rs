@@ -1,15 +1,19 @@
-//! Find `.env*` files under folders the user added and group them by git repo.
+//! Find `.env` files under folders the user added and group them by git repo.
 //!
-//! This never walks a whole disk. It skips dependency and build directories,
-//! and it does not follow directory symlinks. Key *names* are kept so search
-//! can run without re-reading files; values are dropped before a project is
-//! returned.
+//! The walk is parallel, skips dependency and build directories, and does not
+//! follow directory symlinks. It records paths only. Key names are filled
+//! later by [`fill_key_index`]; values are never kept.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
-use crate::config::Config;
+use ignore::{WalkBuilder, WalkState};
+use serde::{Deserialize, Serialize};
+
+use crate::config::{config_dir, Config};
 use crate::diff::missing_vs_example;
 use crate::document::EnvDocument;
 
@@ -23,8 +27,11 @@ const SKIP_DIRS: &[&str] = &[
     "target",
     "dist",
     "vendor",
+    "packages",
     ".next",
     "build",
+    "bin",
+    "obj",
     "venv",
     ".venv",
     "__pycache__",
@@ -32,7 +39,9 @@ const SKIP_DIRS: &[&str] = &[
     "coverage",
     ".turbo",
     ".cache",
+    ".gradle",
     ".idea",
+    ".vs",
     ".vscode",
 ];
 
@@ -40,7 +49,34 @@ const MAX_FILE_BYTES: u64 = 1024 * 1024;
 
 /// Dependency and VCS directories the walk never enters.
 pub fn is_skipped_dir(name: &str) -> bool {
-    SKIP_DIRS.iter().any(|skip| name == *skip)
+    SKIP_DIRS.iter().any(|skip| name.eq_ignore_ascii_case(skip))
+}
+
+/// One env file found by the walk. Paths only: the file is not read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FoundEnv {
+    pub path: PathBuf,
+    pub root: PathBuf,
+    pub name: String,
+}
+
+/// On-disk list of env paths for the folders the user added. No values.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexCache {
+    #[serde(default)]
+    pub folders: Vec<CachedFolder>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CachedFolder {
+    pub path: PathBuf,
+    pub files: Vec<CachedFile>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CachedFile {
+    pub path: PathBuf,
+    pub root: PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,48 +112,336 @@ struct Found {
     document: EnvDocument,
 }
 
-/// Scan `folders` and group env files by repository, including git names.
+/// Scan `folders`, index key names, and attach git names.
 ///
-/// The window should call [`discover_files`] first and [`attach_git_identity`]
-/// afterwards. Both do disk IO and belong on a background task. Git config and
-/// `HEAD` are not read until `attach_git_identity`.
+/// The window should call [`scan_paths`] (paths stream in as they are found),
+/// then [`fill_key_index`] and [`attach_git_identity`]. All three do disk IO
+/// and belong on a background task. Git config and `HEAD` are not read until
+/// `attach_git_identity`. File contents are not read until `fill_key_index`.
 pub fn discover(folders: &[PathBuf], config: &Config) -> (Vec<Project>, Vec<ScanError>) {
     let (mut projects, errors) = discover_files(folders, config);
+    fill_key_index(&mut projects);
     attach_git_identity(&mut projects, config);
     (projects, errors)
 }
 
 /// Walk env files and group them. Project names are the folder names.
-/// Branch is `"…"` until [`attach_git_identity`] runs.
+/// Branch is `"…"` until [`attach_git_identity`] runs. Keys are empty until
+/// [`fill_key_index`].
 ///
-/// The walk skips [`is_skipped_dir`] directories, does not follow symlinks,
-/// and stops at [`MAX_SCAN_DEPTH`]. It does not read git config or `HEAD`.
+/// The walk skips [`is_skipped_dir`] directories and ignored directories, does
+/// not follow symlinks, and stops at [`MAX_SCAN_DEPTH`]. It does not read file
+/// contents, git config, or `HEAD`.
 pub fn discover_files(folders: &[PathBuf], config: &Config) -> (Vec<Project>, Vec<ScanError>) {
     let _ = config;
-    let mut found: Vec<Found> = Vec::new();
-    let mut errors = Vec::new();
+    let found = Mutex::new(Vec::new());
+    let errors = scan_paths(folders, |file| {
+        found.lock().expect("found").push(file);
+    });
+    let found = found.into_inner().expect("found");
+    (projects_from_found(found), errors)
+}
+
+/// Walk `folders` in parallel and call `on_file` as soon as each env file is found.
+///
+/// `on_file` runs on the walker threads. It must not read the file. Ignored
+/// directories are not entered. Ignored *files* whose names match `.env`,
+/// `.env.*`, or `*.env` are still reported.
+pub fn scan_paths(folders: &[PathBuf], on_file: impl Fn(FoundEnv) + Send + Sync) -> Vec<ScanError> {
+    let errors = Mutex::new(Vec::new());
+    let roots = Mutex::new(HashMap::<PathBuf, PathBuf>::new());
     for folder in folders {
-        walk(folder, 0, &mut found, &mut errors);
+        if !folder.is_dir() {
+            errors.lock().expect("errors").push(ScanError {
+                path: folder.clone(),
+                message: "folder is missing".into(),
+            });
+            continue;
+        }
+        let mut overrides = ignore::overrides::OverrideBuilder::new(folder);
+        let _ = overrides.case_insensitive(true);
+        for pattern in [".env", ".env.*", "*.env"] {
+            if overrides.add(pattern).is_err() {
+                errors.lock().expect("errors").push(ScanError {
+                    path: folder.clone(),
+                    message: "could not build the file name filter".into(),
+                });
+            }
+        }
+        let mut builder = WalkBuilder::new(folder);
+        builder
+            .follow_links(false)
+            .hidden(false)
+            .parents(true)
+            .git_ignore(true)
+            .git_global(true)
+            .git_exclude(true)
+            .ignore(true)
+            .max_depth(Some(MAX_SCAN_DEPTH + 1))
+            .threads(walk_threads())
+            .filter_entry(|entry| {
+                let name = entry.file_name().to_string_lossy();
+                if is_skipped_dir(&name) {
+                    return false;
+                }
+                !entry.file_type().is_some_and(|kind| kind.is_symlink())
+            });
+        if let Ok(overrides) = overrides.build() {
+            builder.overrides(overrides);
+        }
+        let on_file = &on_file;
+        let errors = &errors;
+        let roots = &roots;
+        builder.build_parallel().run(|| {
+            Box::new(|result| {
+                let entry = match result {
+                    Ok(entry) => entry,
+                    Err(err) => {
+                        errors.lock().expect("errors").push(ScanError {
+                            path: PathBuf::new(),
+                            message: err.to_string(),
+                        });
+                        return WalkState::Continue;
+                    }
+                };
+                let name = entry.file_name().to_string_lossy();
+                if !is_env_filename(&name) {
+                    return WalkState::Continue;
+                }
+                let is_file = match entry.file_type() {
+                    Some(kind) => kind.is_file(),
+                    None => entry.metadata().is_ok_and(|meta| meta.is_file()),
+                };
+                if !is_file {
+                    return WalkState::Continue;
+                }
+                match entry.metadata() {
+                    Ok(meta) if meta.len() > MAX_FILE_BYTES => {
+                        errors.lock().expect("errors").push(ScanError {
+                            path: entry.path().to_path_buf(),
+                            message: "skipped; larger than 1 MiB".into(),
+                        });
+                        return WalkState::Continue;
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        errors.lock().expect("errors").push(ScanError {
+                            path: entry.path().to_path_buf(),
+                            message: err.to_string(),
+                        });
+                        return WalkState::Continue;
+                    }
+                }
+                let path = entry.path().to_path_buf();
+                let root = project_root_cached(&path, roots);
+                on_file(FoundEnv {
+                    name: name.into_owned(),
+                    path,
+                    root,
+                });
+                WalkState::Continue
+            })
+        });
     }
+    errors.into_inner().expect("errors")
+}
 
-    let mut groups: BTreeMap<PathBuf, Vec<Found>> = BTreeMap::new();
-    let mut roots = std::collections::HashMap::<PathBuf, PathBuf>::new();
+fn walk_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(4)
+        .clamp(2, 8)
+}
+
+/// Read key names for files already found. Values are dropped before return.
+pub fn fill_key_index(projects: &mut [Project]) {
+    for project in projects {
+        let mut found = Vec::with_capacity(project.files.len());
+        let mut unread = Vec::new();
+        for file in &project.files {
+            match fs::read(&file.path) {
+                Ok(bytes) => match String::from_utf8(bytes) {
+                    Ok(text) => {
+                        let document = EnvDocument::parse(&text);
+                        let keys = document.key_names();
+                        found.push(Found {
+                            path: file.path.clone(),
+                            name: file.name.clone(),
+                            keys,
+                            document,
+                        });
+                    }
+                    Err(_) => unread.push(file.clone()),
+                },
+                Err(_) => unread.push(file.clone()),
+            }
+        }
+        let rebuilt = build_project(project.root.clone(), found);
+        let mut files = rebuilt.files;
+        files.extend(unread);
+        files.sort_by(|a, b| {
+            file_rank(&a.name)
+                .cmp(&file_rank(&b.name))
+                .then(a.name.cmp(&b.name))
+                .then(a.path.cmp(&b.path))
+        });
+        project.missing_vs_example = files.iter().any(|file| file.missing_vs_example);
+        project.files = files;
+    }
+}
+
+pub fn index_cache_path() -> PathBuf {
+    config_dir().join("index-cache.toml")
+}
+
+pub fn load_index_cache() -> IndexCache {
+    load_index_cache_from(&index_cache_path())
+}
+
+pub fn load_index_cache_from(path: &Path) -> IndexCache {
+    match fs::read_to_string(path) {
+        Ok(text) => toml::from_str(&text).unwrap_or_default(),
+        Err(_) => IndexCache::default(),
+    }
+}
+
+pub fn save_index_cache(cache: &IndexCache) -> io::Result<()> {
+    save_index_cache_to(cache, &index_cache_path())
+}
+
+pub fn save_index_cache_to(cache: &IndexCache, path: &Path) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let text = toml::to_string_pretty(cache)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    fs::write(path, text)
+}
+
+/// Rebuild the sidebar list from a path cache. No disk access.
+pub fn projects_from_cache(folders: &[PathBuf], cache: &IndexCache) -> Vec<Project> {
+    let mut found = Vec::new();
+    for folder in folders {
+        let Some(cached) = cache.folders.iter().find(|item| item.path == *folder) else {
+            continue;
+        };
+        for file in &cached.files {
+            let Some(name) = file
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+            else {
+                continue;
+            };
+            if !is_env_filename(&name) {
+                continue;
+            }
+            found.push(FoundEnv {
+                path: file.path.clone(),
+                root: file.root.clone(),
+                name,
+            });
+        }
+    }
+    projects_from_found(found)
+}
+
+pub fn cache_from_projects(folders: &[PathBuf], projects: &[Project]) -> IndexCache {
+    let mut cache = IndexCache {
+        folders: Vec::with_capacity(folders.len()),
+    };
+    for folder in folders {
+        let mut files = Vec::new();
+        for project in projects {
+            if !project.root.starts_with(folder) && project.root != *folder {
+                let in_folder = project
+                    .files
+                    .iter()
+                    .any(|file| file.path.starts_with(folder));
+                if !in_folder {
+                    continue;
+                }
+            }
+            for file in &project.files {
+                if file.path.starts_with(folder) || project.root.starts_with(folder) {
+                    files.push(CachedFile {
+                        path: file.path.clone(),
+                        root: project.root.clone(),
+                    });
+                }
+            }
+        }
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        files.dedup();
+        cache.folders.push(CachedFolder {
+            path: folder.clone(),
+            files,
+        });
+    }
+    cache
+}
+
+fn projects_from_found(found: Vec<FoundEnv>) -> Vec<Project> {
+    let mut projects: Vec<Project> = Vec::new();
     for file in found {
-        let root = cached_project_root(&file.path, &mut roots);
-        groups.entry(root).or_default().push(file);
+        upsert_file(
+            &mut projects,
+            file.root,
+            EnvFile {
+                path: file.path,
+                name: file.name.clone(),
+                keys: Vec::new(),
+                prod: is_prod_filename(&file.name),
+                missing_vs_example: false,
+            },
+        );
     }
+    sort_projects(&mut projects);
+    projects
+}
 
-    let mut projects = Vec::new();
-    for (root, files) in groups {
-        projects.push(build_project(root, files));
+pub fn upsert_file(projects: &mut Vec<Project>, root: PathBuf, file: EnvFile) {
+    if let Some(project) = projects.iter_mut().find(|project| project.root == root) {
+        if let Some(existing) = project.files.iter_mut().find(|item| item.path == file.path) {
+            if existing.keys.is_empty() {
+                existing.keys = file.keys;
+                existing.missing_vs_example = file.missing_vs_example;
+                existing.prod = file.prod;
+            }
+            return;
+        }
+        project.files.push(file);
+        project.files.sort_by(|a, b| {
+            file_rank(&a.name)
+                .cmp(&file_rank(&b.name))
+                .then(a.name.cmp(&b.name))
+                .then(a.path.cmp(&b.path))
+        });
+        project.missing_vs_example = project.files.iter().any(|item| item.missing_vs_example);
+        return;
     }
+    let name = root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".into());
+    let missing_vs_example = file.missing_vs_example;
+    projects.push(Project {
+        root,
+        name,
+        branch: "…".into(),
+        files: vec![file],
+        missing_vs_example,
+    });
+    sort_projects(projects);
+}
+
+fn sort_projects(projects: &mut [Project]) {
     projects.sort_by(|a, b| {
         a.name
             .to_ascii_lowercase()
             .cmp(&b.name.to_ascii_lowercase())
             .then(a.root.cmp(&b.root))
     });
-    (projects, errors)
 }
 
 /// Fill `name` and `branch` from git config and `HEAD`. Disk IO.
@@ -135,9 +459,6 @@ pub fn is_prod_filename(name: &str) -> bool {
 }
 
 pub fn is_env_filename(name: &str) -> bool {
-    if !name.starts_with(".env") {
-        return false;
-    }
     if name.ends_with('~')
         || name.ends_with(".swp")
         || name.ends_with(".swo")
@@ -145,7 +466,8 @@ pub fn is_env_filename(name: &str) -> bool {
     {
         return false;
     }
-    true
+    let lower = name.to_ascii_lowercase();
+    lower == ".env" || lower.starts_with(".env.") || lower.ends_with(".env")
 }
 
 /// Preferred file to open when a project is selected and the link didn't name one.
@@ -196,78 +518,15 @@ pub fn resolve_file(project: &Project, file: &str) -> Option<usize> {
     })
 }
 
-fn walk(dir: &Path, depth: usize, found: &mut Vec<Found>, errors: &mut Vec<ScanError>) {
-    if depth > MAX_SCAN_DEPTH {
-        return;
+fn project_root_cached(file: &Path, cache: &Mutex<HashMap<PathBuf, PathBuf>>) -> PathBuf {
+    let start = file.parent().unwrap_or(file).to_path_buf();
+    if let Some(root) = cache.lock().expect("roots").get(&start).cloned() {
+        return root;
     }
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(err) => {
-            errors.push(ScanError {
-                path: dir.to_path_buf(),
-                message: err.to_string(),
-            });
-            return;
-        }
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let meta = match fs::symlink_metadata(&path) {
-            Ok(meta) => meta,
-            Err(err) => {
-                errors.push(ScanError {
-                    path: path.clone(),
-                    message: err.to_string(),
-                });
-                continue;
-            }
-        };
-        // Directory links can escape the folder the user added. File links are
-        // skipped too: the scan reports the path it can see, not a second copy.
-        if meta.file_type().is_symlink() {
-            continue;
-        }
-        if meta.is_dir() {
-            if is_skipped_dir(&name) {
-                continue;
-            }
-            walk(&path, depth + 1, found, errors);
-            continue;
-        }
-        if !meta.is_file() || !is_env_filename(&name) {
-            continue;
-        }
-        if meta.len() > MAX_FILE_BYTES {
-            errors.push(ScanError {
-                path: path.clone(),
-                message: "skipped; larger than 1 MiB".into(),
-            });
-            continue;
-        }
-        match fs::read(&path) {
-            Ok(bytes) => match String::from_utf8(bytes) {
-                Ok(text) => {
-                    let document = EnvDocument::parse(&text);
-                    let keys = document.key_names();
-                    found.push(Found {
-                        path,
-                        name,
-                        keys,
-                        document,
-                    });
-                }
-                Err(_) => errors.push(ScanError {
-                    path,
-                    message: "skipped; not valid utf-8".into(),
-                }),
-            },
-            Err(err) => errors.push(ScanError {
-                path,
-                message: err.to_string(),
-            }),
-        }
-    }
+    let root = project_root(file);
+    let mut guard = cache.lock().expect("roots");
+    guard.insert(start, root.clone());
+    root
 }
 
 fn build_project(root: PathBuf, files: Vec<Found>) -> Project {
@@ -316,19 +575,6 @@ fn build_project(root: PathBuf, files: Vec<Found>) -> Project {
         files: env_files,
         missing_vs_example,
     }
-}
-
-fn cached_project_root(
-    file: &Path,
-    cache: &mut std::collections::HashMap<PathBuf, PathBuf>,
-) -> PathBuf {
-    let start = file.parent().unwrap_or(file).to_path_buf();
-    if let Some(root) = cache.get(&start) {
-        return root.clone();
-    }
-    let root = project_root(file);
-    cache.insert(start, root.clone());
-    root
 }
 
 pub fn is_example_filename(name: &str) -> bool {
@@ -698,16 +944,115 @@ mod tests {
         fs::write(deep.join(".env"), "DEEP=1\n").unwrap();
 
         let (projects, _) = discover_files(&[root.clone()], &Config::default());
+        let paths: Vec<_> = projects
+            .iter()
+            .flat_map(|project| project.files.iter().map(|file| file.path.clone()))
+            .collect();
+        assert_eq!(paths, vec![root.join(".env")]);
+        assert!(is_skipped_dir("node_modules"));
+        assert!(is_skipped_dir("Node_Modules"));
+        assert!(!is_skipped_dir("src"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn env_filenames() {
+        assert!(is_env_filename(".env"));
+        assert!(is_env_filename(".env.local"));
+        assert!(is_env_filename(".env.production"));
+        assert!(is_env_filename("production.env"));
+        assert!(is_env_filename(".ENV"));
+        assert!(!is_env_filename(".envrc"));
+        assert!(!is_env_filename(".environment"));
+        assert!(!is_env_filename(".env.local.swp"));
+        assert!(!is_env_filename(".env.envy-tmp"));
+        assert!(!is_env_filename("readme.md"));
+    }
+
+    #[test]
+    fn gitignored_env_files_are_kept_and_ignored_directories_are_not() {
+        let root = scratch();
+        let repo = root.join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::write(repo.join(".gitignore"), ".env\n*.env\nscratch-out/\n").unwrap();
+        fs::write(repo.join(".ignore"), "skipme/\n").unwrap();
+        fs::write(repo.join(".env"), "VISIBLE=1\n").unwrap();
+        fs::write(repo.join("local.env"), "ALSO=1\n").unwrap();
+        fs::create_dir_all(repo.join("scratch-out")).unwrap();
+        fs::write(repo.join("scratch-out").join(".env"), "HIDDEN=1\n").unwrap();
+        fs::create_dir_all(repo.join("skipme")).unwrap();
+        fs::write(repo.join("skipme").join(".env"), "IGNORED=1\n").unwrap();
+        fs::create_dir_all(repo.join("node_modules").join("pkg")).unwrap();
+        fs::write(
+            repo.join("node_modules").join("pkg").join(".env"),
+            "NOPE=1\n",
+        )
+        .unwrap();
+
+        let (mut projects, errors) = discover_files(&[root.clone()], &Config::default());
+        assert!(errors.is_empty(), "{errors:?}");
+        let paths: Vec<_> = projects
+            .iter()
+            .flat_map(|project| project.files.iter().map(|file| file.name.clone()))
+            .collect();
+        assert!(paths.contains(&".env".to_string()), "{paths:?}");
+        assert!(paths.contains(&"local.env".to_string()), "{paths:?}");
+        assert!(!paths
+            .iter()
+            .any(|name| name == "HIDDEN" || name.contains("skipme")));
+        assert_eq!(projects[0].files.len(), 2, "{paths:?}");
+        assert!(projects[0].files.iter().all(|file| file.keys.is_empty()));
+
+        fill_key_index(&mut projects);
         let keys: Vec<_> = projects
             .iter()
-            .flat_map(|project| project.files.iter().flat_map(|file| file.keys.iter()))
-            .cloned()
+            .flat_map(|project| project.files.iter().flat_map(|file| file.keys.clone()))
             .collect();
-        assert!(keys.iter().any(|key| key == "ROOT"), "{keys:?}");
-        assert!(!keys.iter().any(|key| key == "SKIP"), "{keys:?}");
-        assert!(!keys.iter().any(|key| key == "DEEP"), "{keys:?}");
-        assert!(is_skipped_dir("node_modules"));
-        assert!(!is_skipped_dir("src"));
+        assert!(keys.iter().any(|key| key == "VISIBLE"), "{keys:?}");
+        assert!(keys.iter().any(|key| key == "ALSO"), "{keys:?}");
+        assert!(!keys
+            .iter()
+            .any(|key| key == "HIDDEN" || key == "NOPE" || key == "IGNORED"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn index_cache_stores_paths_and_not_values() {
+        let root = scratch();
+        let repo = root.join("billing");
+        fs::create_dir_all(&repo).unwrap();
+        let secret = "SUPER_SECRET_VALUE_SHOULD_NOT_BE_CACHED";
+        fs::write(repo.join(".env"), format!("TOKEN={secret}\n")).unwrap();
+        let (projects, _) = discover_files(&[root.clone()], &Config::default());
+        let cache = cache_from_projects(&[root.clone()], &projects);
+        let cache_path = root.join("index-cache.toml");
+        save_index_cache_to(&cache, &cache_path).unwrap();
+        let text = fs::read_to_string(&cache_path).unwrap();
+        assert!(!text.contains(secret), "{text}");
+        assert!(text.contains(".env"), "{text}");
+        let loaded = load_index_cache_from(&cache_path);
+        let restored = projects_from_cache(&[root.clone()], &loaded);
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].files.len(), 1);
+        assert!(restored[0].files[0].keys.is_empty());
+        assert_eq!(restored[0].files[0].path, projects[0].files[0].path);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scan_reports_the_first_file_before_the_walk_finishes() {
+        let root = scratch();
+        fs::write(root.join(".env"), "A=1\n").unwrap();
+        fs::create_dir_all(root.join("later")).unwrap();
+        fs::write(root.join("later").join(".env.local"), "B=1\n").unwrap();
+        let seen = Mutex::new(Vec::new());
+        let errors = scan_paths(&[root.clone()], |found| {
+            seen.lock().expect("seen").push(found.name);
+        });
+        assert!(errors.is_empty(), "{errors:?}");
+        let seen = seen.into_inner().expect("seen");
+        assert!(seen.iter().any(|name| name == ".env"), "{seen:?}");
+        assert!(seen.iter().any(|name| name == ".env.local"), "{seen:?}");
         let _ = fs::remove_dir_all(&root);
     }
 }

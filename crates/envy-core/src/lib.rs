@@ -27,8 +27,9 @@ pub use config::{config_dir, config_path, Config, Settings, ThemeSetting};
 pub use deeplink::Deeplink;
 pub use diff::{DiffKind, DiffReport, DiffRow};
 pub use discover::{
-    attach_git_identity, discover, discover_files, is_skipped_dir, EnvFile, Project, ScanError,
-    MAX_SCAN_DEPTH,
+    attach_git_identity, cache_from_projects, discover, discover_files, fill_key_index,
+    is_env_filename, is_skipped_dir, load_index_cache, projects_from_cache, save_index_cache,
+    scan_paths, upsert_file, EnvFile, FoundEnv, IndexCache, Project, ScanError, MAX_SCAN_DEPTH,
 };
 pub use document::{is_env_key, Entry, EnvDocument, Node, QuoteStyle};
 pub use hotkey::{Hotkey, HotkeyError};

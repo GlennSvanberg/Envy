@@ -6,15 +6,20 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use envy_core::discover::{default_file_index, is_example_filename, resolve_file, resolve_project};
+use envy_core::discover::{
+    default_file_index, is_example_filename, is_prod_filename, resolve_file, resolve_project,
+};
 use envy_core::document::Node;
 use envy_core::paste::{PasteChange, PastePlan};
 use envy_core::search::{SearchCommand, SearchHit, SearchKind};
 use envy_core::{
-    attach_git_identity, diff, discover_files, from_example, is_env_key, plan_paste, save_text,
-    search, Config, Deeplink, EnvDocument, OpenFile, Project, ScanError, ThemeSetting,
+    attach_git_identity, cache_from_projects, diff, fill_key_index, from_example, is_env_key,
+    load_index_cache, plan_paste, projects_from_cache, save_index_cache, save_text, scan_paths,
+    search, upsert_file, Config, Deeplink, EnvDocument, EnvFile, FoundEnv, OpenFile, Project,
+    ScanError, ThemeSetting,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -33,7 +38,6 @@ use crate::hotkey_os;
 use crate::instance::Instance;
 
 const CLEAR_AFTER: Duration = Duration::from_secs(30);
-const RESCAN_AFTER: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Zone {
@@ -96,6 +100,9 @@ pub struct EnvyApp {
     /// Config has not been read yet. The first frame paints before that.
     booting: bool,
     scanning: bool,
+    scan_found: usize,
+    scan_again: bool,
+    watch: Option<crate::watch::FolderWatch>,
     scan_epoch: u64,
     io_epoch: u64,
     save_seq: u64,
@@ -111,10 +118,14 @@ pub struct EnvyApp {
     pending_launch: Option<String>,
     pending_file: Option<PathBuf>,
     pending_key: Option<String>,
-    last_scan: Instant,
     startup_logged: bool,
     ui_ready: Duration,
     config_load: Duration,
+}
+
+enum ScanMsg {
+    Found(FoundEnv),
+    Done(Vec<ScanError>),
 }
 
 enum IoJob {
@@ -180,6 +191,9 @@ impl EnvyApp {
             poll_task: None,
             booting: true,
             scanning: false,
+            scan_found: 0,
+            scan_again: false,
+            watch: None,
             scan_epoch: 0,
             io_epoch: 0,
             save_seq: 0,
@@ -195,7 +209,6 @@ impl EnvyApp {
             pending_launch: launch,
             pending_file: None,
             pending_key: None,
-            last_scan: now,
             startup_logged: false,
             ui_ready: crate::STARTED
                 .get()
@@ -226,11 +239,12 @@ impl EnvyApp {
                 .spawn(async move {
                     let began = Instant::now();
                     let config = Config::load();
-                    (config, began.elapsed())
+                    let cached = projects_from_cache(&config.folders, &load_index_cache());
+                    (config, cached, began.elapsed())
                 })
                 .await;
             let _ = this.update(async_cx, |view, cx| {
-                view.finish_boot(loaded.0, ui_ready, loaded.1, cx);
+                view.finish_boot(loaded.0, loaded.1, ui_ready, loaded.2, cx);
             });
         })
         .detach();
@@ -239,6 +253,7 @@ impl EnvyApp {
     fn finish_boot(
         &mut self,
         config: Config,
+        cached: Vec<Project>,
         ui_ready: Duration,
         config_load: Duration,
         cx: &mut Context<Self>,
@@ -264,6 +279,12 @@ impl EnvyApp {
             cx.notify();
             return;
         }
+        if !cached.is_empty() {
+            self.projects = cached;
+            self.project_ix = Some(0);
+            self.ensure_open(cx);
+        }
+        self.arm_watch();
         self.begin_scan(false, cx);
     }
 
@@ -280,6 +301,7 @@ impl EnvyApp {
             window_min_size: Some(size(px(760.), px(480.))),
             focus: true,
             show: true,
+            icon: crate::window_icon(),
             ..Default::default()
         }
     }
@@ -342,8 +364,12 @@ impl EnvyApp {
             }
         }
         self.schedule_disk_check(cx);
-        if !self.booting && self.last_scan.elapsed() >= RESCAN_AFTER {
-            self.begin_scan(true, cx);
+        if self.watch.as_ref().is_some_and(|watch| watch.pinged()) {
+            if self.scanning {
+                self.scan_again = true;
+            } else if !self.booting {
+                self.begin_scan(true, cx);
+            }
         }
         if self.diff_stale {
             self.diff_stale = false;
@@ -388,80 +414,160 @@ impl EnvyApp {
     fn begin_scan(&mut self, quiet: bool, cx: &mut Context<Self>) {
         if self.config.folders.is_empty() {
             self.scanning = false;
+            self.scan_found = 0;
             self.projects.clear();
             self.scan_errors.clear();
+            cx.notify();
             return;
         }
-        self.last_scan = Instant::now();
         self.scan_epoch = self.scan_epoch.wrapping_add(1);
         let epoch = self.scan_epoch;
         self.scanning = true;
-        if !quiet {
-            self.status = "Scanning folders…".into();
+        self.scan_found = 0;
+        self.scan_again = false;
+        if !quiet && self.status.starts_with("Add a folder") {
+            self.status.clear();
         }
         let folders = self.config.folders.clone();
         let config = self.config.clone();
         cx.notify();
         cx.spawn(async move |this, async_cx| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let mut seen = HashSet::new();
             let started = Instant::now();
-            let scanned = async_cx
-                .background_executor()
-                .spawn(async move { discover_files(&folders, &config) })
-                .await;
-            let files_took = started.elapsed();
-            let config = {
-                let config = this.update(async_cx, |view, cx| {
-                    if view.scan_epoch != epoch {
-                        return None;
-                    }
-                    let (projects, errors) = scanned;
-                    view.apply_projects(projects, errors);
-                    view.scanning = true;
-                    if !quiet {
-                        view.status = "Reading git repos…".into();
-                    }
-                    view.ensure_open(cx);
-                    view.open_pending_file(cx);
-                    cx.notify();
-                    Some(view.config.clone())
-                });
-                match config {
-                    Ok(Some(config)) => config,
-                    _ => return,
-                }
-            };
-            let mut projects = this
-                .update(async_cx, |view, _cx| view.projects.clone())
-                .unwrap_or_default();
-            let git_started = Instant::now();
-            let named = async_cx
+            let folders_for_scan = folders.clone();
+            async_cx
                 .background_executor()
                 .spawn(async move {
-                    attach_git_identity(&mut projects, &config);
-                    projects
+                    let errors = scan_paths(&folders_for_scan, |found| {
+                        let _ = tx.send(ScanMsg::Found(found));
+                    });
+                    let _ = tx.send(ScanMsg::Done(errors));
                 })
-                .await;
-            let git_took = git_started.elapsed();
-            let _ = this.update(async_cx, |view, cx| {
-                if view.scan_epoch != epoch {
-                    return;
+                .detach();
+            loop {
+                let alive = this
+                    .update(async_cx, |view, _cx| view.scan_epoch == epoch)
+                    .unwrap_or(false);
+                if !alive {
+                    break;
                 }
-                let errors = view.scan_errors.clone();
-                view.apply_projects(named, errors);
-                view.scanning = false;
-                view.ensure_open(cx);
-                view.open_pending_file(cx);
-                view.follow_pending_launch(cx);
-                if !quiet && view.status.starts_with("Reading git") {
-                    view.status.clear();
+                let mut found = Vec::new();
+                let mut done = None;
+                loop {
+                    match rx.try_recv() {
+                        Ok(ScanMsg::Found(file)) => found.push(file),
+                        Ok(ScanMsg::Done(errors)) => {
+                            done = Some(errors);
+                            break;
+                        }
+                        Err(_) => break,
+                    }
                 }
-                if !quiet {
-                    view.log_startup(Some(files_took), Some(git_took));
+                for file in &found {
+                    seen.insert(file.path.clone());
                 }
-                cx.notify();
-            });
+                if !found.is_empty() {
+                    let _ = this.update(async_cx, |view, cx| {
+                        if view.scan_epoch != epoch {
+                            return;
+                        }
+                        view.ingest_found(found, cx);
+                    });
+                }
+                if let Some(errors) = done {
+                    let files_took = started.elapsed();
+                    let mut projects = this
+                        .update(async_cx, |view, _cx| view.projects.clone())
+                        .unwrap_or_default();
+                    for project in &mut projects {
+                        project.files.retain(|file| seen.contains(&file.path));
+                    }
+                    projects.retain(|project| !project.files.is_empty());
+                    let config_for_git = config.clone();
+                    let git_started = Instant::now();
+                    let named = async_cx
+                        .background_executor()
+                        .spawn(async move {
+                            fill_key_index(&mut projects);
+                            attach_git_identity(&mut projects, &config_for_git);
+                            projects
+                        })
+                        .await;
+                    let git_took = git_started.elapsed();
+                    let folders_for_cache = folders.clone();
+                    let cache = cache_from_projects(&folders_for_cache, &named);
+                    async_cx
+                        .background_executor()
+                        .spawn(async move {
+                            let _ = save_index_cache(&cache);
+                        })
+                        .detach();
+                    let _ = this.update(async_cx, |view, cx| {
+                        if view.scan_epoch != epoch {
+                            return;
+                        }
+                        view.apply_projects(named, errors);
+                        view.scanning = false;
+                        view.arm_watch();
+                        view.ensure_open(cx);
+                        view.open_pending_file(cx);
+                        view.follow_pending_launch(cx);
+                        if !quiet {
+                            view.log_startup(Some(files_took), Some(git_took));
+                        }
+                        cx.notify();
+                        if view.scan_again {
+                            view.begin_scan(true, cx);
+                        }
+                    });
+                    break;
+                }
+                async_cx
+                    .background_executor()
+                    .timer(Duration::from_millis(32))
+                    .await;
+            }
         })
         .detach();
+    }
+
+    fn ingest_found(&mut self, found: Vec<FoundEnv>, cx: &mut Context<Self>) {
+        for file in found {
+            let prod = is_prod_filename(&file.name);
+            upsert_file(
+                &mut self.projects,
+                file.root,
+                EnvFile {
+                    path: file.path,
+                    name: file.name,
+                    keys: Vec::new(),
+                    prod,
+                    missing_vs_example: false,
+                },
+            );
+            self.scan_found = self.scan_found.saturating_add(1);
+        }
+        if self.project_ix.is_none() && !self.projects.is_empty() {
+            self.project_ix = Some(0);
+            self.file_ix = self
+                .project_ix
+                .and_then(|index| self.projects.get(index))
+                .and_then(default_file_index);
+        }
+        self.ensure_open(cx);
+        self.open_pending_file(cx);
+        cx.notify();
+    }
+
+    fn arm_watch(&mut self) {
+        let mut paths = self.config.folders.clone();
+        for project in &self.projects {
+            if !paths.iter().any(|path| path == &project.root) {
+                paths.push(project.root.clone());
+            }
+        }
+        self.watch = Some(crate::watch::spawn(paths));
     }
 
     fn apply_projects(&mut self, projects: Vec<Project>, errors: Vec<ScanError>) {
@@ -1577,7 +1683,6 @@ impl EnvyApp {
             "settings" => self.open_settings(window, cx),
             "refresh" => {
                 self.begin_scan(false, cx);
-                self.status = "Scanning folders…".into();
                 cx.notify();
             }
             "copy" => self.copy_selected(cx),
@@ -1610,7 +1715,7 @@ impl EnvyApp {
                     cx.notify();
                 }
                 Ok(Err(err)) => {
-                    view.status = format!("Folder dialog unavailable ({err}). Type a path.");
+                    view.status = format!("Couldn't open the folder picker ({err}). Type a path.");
                     view.show_path_panel(cx);
                 }
                 Err(_) => {}
@@ -2039,28 +2144,59 @@ impl Render for EnvyApp {
                     .items_center()
                     .justify_between()
                     .child(
-                        div()
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child("Envy"),
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                gpui_kit::img(app_mark())
+                                    .w(px(18.))
+                                    .h(px(18.))
+                                    .rounded(px(4.)),
+                            )
+                            .child(
+                                div()
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                    .child("Envy"),
+                            ),
                     )
-                    .child(
-                        icon_button("add-folder", IconName::FolderPlus, "Add folder").on_click({
-                            let entity = entity.clone();
-                            move |_, window, cx| {
-                                entity.update(cx, |this, cx| this.open_add_folder(window, cx));
-                            }
-                        }),
-                    ),
+                    .child({
+                        let mut tools = h_flex().gap_2().items_center();
+                        if self.scanning {
+                            tools = tools
+                                .child(
+                                    gpui_kit::component::Icon::new(IconName::LoaderCircle).xsmall(),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme_muted)
+                                        .child(files_found_label(self.scan_found)),
+                                );
+                        }
+                        tools.child(
+                            icon_button("add-folder", IconName::FolderPlus, "Add folder").on_click(
+                                {
+                                    let entity = entity.clone();
+                                    move |_, window, cx| {
+                                        entity.update(cx, |this, cx| {
+                                            this.open_add_folder(window, cx)
+                                        });
+                                    }
+                                },
+                            ),
+                        )
+                    }),
             );
-        if self.booting || self.scanning {
-            sidebar = sidebar.child(div().px_3().py_2().text_sm().text_color(theme_muted).child(
-                if self.booting {
-                    "Starting…"
-                } else {
-                    "Scanning…"
-                },
-            ));
-        } else if project_rows.is_empty() {
+        if self.booting && project_rows.is_empty() {
+            sidebar = sidebar.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_sm()
+                    .text_color(theme_muted)
+                    .child("Starting…"),
+            );
+        } else if project_rows.is_empty() && !self.scanning {
             sidebar = sidebar.child(
                 div()
                     .px_3()
@@ -2425,22 +2561,16 @@ impl Render for EnvyApp {
                     .child(div().child(hints)),
             );
 
-        if self.booting || (self.scanning && self.projects.is_empty()) {
+        if self.booting && self.projects.is_empty() {
             center = v_flex()
                 .flex_1()
                 .h_full()
                 .items_center()
                 .justify_center()
-                .gap_2()
                 .bg(theme_bg)
                 .text_color(theme_muted)
-                .child(if self.booting {
-                    "Starting…"
-                } else {
-                    "Looking for .env files…"
-                })
-                .child(div().text_xs().child("The window stays responsive."));
-        } else if self.projects.is_empty() {
+                .child("Starting…");
+        } else if self.projects.is_empty() && !self.scanning {
             let entity = cx.entity();
             center = v_flex()
                 .flex_1()
@@ -2488,8 +2618,7 @@ impl Render for EnvyApp {
                 .gap_2()
                 .bg(theme_bg)
                 .text_color(theme_muted)
-                .child("Select a project on the left.")
-                .child(div().text_xs().child("Files stay where they are."));
+                .child("Select a file");
         }
 
         let mut root = h_flex()
@@ -2536,7 +2665,6 @@ impl Render for EnvyApp {
                 cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)),
             )
             .on_action(cx.listener(|this, _: &Refresh, _, cx| {
-                this.last_scan = Instant::now() - RESCAN_AFTER;
                 this.begin_scan(false, cx);
                 cx.notify();
             }))
@@ -2969,7 +3097,7 @@ impl EnvyApp {
                 div()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child("Settings live in the envy config file. Values never do."),
+                    .child("Secret values stay in your .env files."),
             )
     }
 
@@ -3034,15 +3162,16 @@ impl EnvyApp {
             .border_1()
             .border_color(cx.theme().border)
             .rounded_md()
-            .child(div().font_weight(gpui_kit::FontWeight::SEMIBOLD).child(format!(
-                "Paste {} keys",
-                plan.changes.len()
-            )))
+            .child(
+                div()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .child(format!("Paste {} keys", plan.changes.len())),
+            )
             .child(
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("Enter confirms. Esc cancels. Existing lines you do not touch stay byte-for-byte."),
+                    .child("Enter confirms. Esc cancels. Lines you leave alone stay as they are."),
             )
             .child(list)
     }
@@ -3288,7 +3417,7 @@ impl EnvyApp {
                 .spawn(async move {
                     hotkey_os::request(spec)
                         .recv()
-                        .unwrap_or_else(|_| Err("Hotkey thread stopped.".into()))
+                        .unwrap_or_else(|_| Err("Couldn't change the hotkey.".into()))
                 })
                 .await;
             let _ = this.update(async_cx, |view, cx| match result {
@@ -3346,6 +3475,25 @@ fn theme_button(
         .on_click(move |_, window, cx| {
             entity.update(cx, |this, cx| this.set_theme(theme, window, cx));
         })
+}
+
+fn app_mark() -> Arc<gpui_kit::Image> {
+    static MARK: OnceLock<Arc<gpui_kit::Image>> = OnceLock::new();
+    MARK.get_or_init(|| {
+        Arc::new(gpui_kit::Image::from_bytes(
+            gpui_kit::ImageFormat::Png,
+            include_bytes!("../../../assets/icon/envy-icon-32.png").to_vec(),
+        ))
+    })
+    .clone()
+}
+
+fn files_found_label(count: usize) -> String {
+    if count == 1 {
+        "1 file".into()
+    } else {
+        format!("{count} files")
+    }
 }
 
 fn icon_button(

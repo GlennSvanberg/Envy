@@ -10,11 +10,20 @@ mod hotkey_os;
 mod instance;
 mod protocol;
 mod view;
+mod watch;
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use gpui_kit::{App, AppContext};
 use view::EnvyApp;
+
+pub(crate) fn window_icon() -> Option<Arc<image::RgbaImage>> {
+    let bytes = include_bytes!("../../../assets/icon/envy-icon-64.png");
+    image::load_from_memory(bytes)
+        .ok()
+        .map(|image| Arc::new(image.into_rgba8()))
+}
 
 /// Process start, before any window work. Used to measure time-to-first-frame.
 pub(crate) static STARTED: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();

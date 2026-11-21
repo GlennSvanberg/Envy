@@ -7,5 +7,6 @@ publish.workspace = true
 description = "Lossless .env parsing, diff, discovery, and config for Envy. No UI."
 
 [dependencies]
+ignore = "0.4"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

@@ -13,14 +13,16 @@ Cargo.toml                 workspace, release profile (thin LTO, strip, opt-leve
 crates/envy-core/          no window, no gpui
   document.rs              lossless parse and serialize
   session.rs               one open file: undo stack, dirty flag, atomic save
-  discover.rs              walk folders, git grouping, which names count as env files
+  discover.rs              parallel walk, path cache, git grouping, env file names
   diff.rs paste.rs         compare files, Vercel-style paste
   scaffold.rs              .env.example -> new file, secrets cleared
   search.rs config.rs      palette scoring, config.toml
   deeplink.rs hotkey.rs    envy:// and the global chord
   future.rs                named, unimplemented seams (age, self-decrypting HTML, git exposure)
 crates/envy/               the window
-  main.rs                  gpui-kit app, AllAssets (full icon set), quit saves
+  main.rs                  gpui-kit app, AllAssets (full icon set), window icon, quit saves
+  build.rs                 embeds assets/icon/envy.ico into envy.exe on Windows
+assets/icon/               logo sources, PNG sizes, envy.ico, README headers
   view.rs                  layout, overlays, key handling
   actions.rs               key bindings (ctrl-, not cmd-)
   instance.rs protocol.rs  single instance and the URL scheme
@@ -55,7 +57,11 @@ Two exceptions stay off that executor on purpose:
 
 Do not call `rfd` or any other synchronous file dialog from a click handler. A nested modal loop on the GPUI thread freezes the window.
 
-Cold start paints an empty window first. Config, the file walk, and git identity run after that, in that order. `discover_files` does not read git config; `attach_git_identity` does, and only in the background. The walk skips `node_modules`, `target`, `.git`, and the other names in `is_skipped_dir`, and it stops at `MAX_SCAN_DEPTH`.
+Cold start paints an empty window first. Config load and the path cache are read after that, still off the UI thread. If a cache exists, the sidebar shows those paths immediately, then `scan_paths` refreshes them in the background. The walk is `ignore`'s `WalkParallel`. It skips `is_skipped_dir` names (`node_modules`, `target`, `.git`, `bin`, `obj`, and the rest) and ignored directories, and it stops at `MAX_SCAN_DEPTH`. It does not read file contents. Gitignored files named `.env`, `.env.*`, or `*.env` are still listed. `fill_key_index` reads key names afterwards, and `attach_git_identity` reads git config and `HEAD`. Both stay on a background task. Found paths are written to `index-cache.toml` (paths only). A non-recursive `notify` watch on the added folders and project roots asks for another scan when an env file appears or disappears. There is no timer that rescans on its own.
+
+## UI copy
+
+UI copy speaks to the user about their task, never about the implementation. Do not mention threads, the window staying responsive, git internals, the config file format, or how a save is atomic. Status text is for what they can do next (`Select a file`, `Saved.`, `Add a folder to start`). A scan shows a count in the sidebar (`12 files`), not a waiting screen.
 
 ## Design rules
 
