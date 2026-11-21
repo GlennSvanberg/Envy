@@ -5,6 +5,7 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -13,15 +14,18 @@ use envy_core::discover::{
 };
 use envy_core::document::{LayoutItem, Node, UnreadableLine};
 use envy_core::paste::{PasteChange, PastePlan};
+use envy_core::scaffold::is_safe_default;
 use envy_core::{
     attach_git_identity, cache_from_projects, diff, fill_key_index, from_example, is_env_key,
     load_index_cache, plan_paste, projects_from_cache, save_index_cache, save_text, scan_paths,
-    sidebar_rank, upsert_file, Config, Deeplink, EnvDocument, EnvFile, FoundEnv, OpenFile, Project,
-    ScanError, ThemeSetting,
+    sidebar_rank, suggest_keys, upsert_file, Config, Deeplink, EditorView, EnvDocument, EnvFile,
+    FoundEnv, KeySuggestion, OpenFile, Project, ScanError, SuggestionSource, ThemeSetting,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{
+    Editor as CodeEditor, EditorState, Input, InputEvent, InputState,
+};
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
@@ -35,6 +39,7 @@ use gpui_kit::{
 };
 
 use crate::actions::*;
+use crate::dotenv_highlight::DotenvHighlighter;
 use crate::hotkey_os;
 use crate::instance::Instance;
 use crate::theme::{
@@ -70,6 +75,9 @@ struct Editor {
     value: Entity<InputState>,
     node: Option<usize>,
     kind: EditKind,
+    suggestions: Vec<KeySuggestion>,
+    suggestion_ix: usize,
+    suggestions_open: bool,
 }
 
 enum Overlay {
@@ -118,6 +126,13 @@ pub struct EnvyApp {
     filter_query: String,
     key_filter: Entity<InputState>,
     key_query: String,
+    editor_view: EditorView,
+    text_editor: Entity<EditorState>,
+    text_editor_syncing: bool,
+    text_editor_needs_sync: bool,
+    text_session_before: Option<EnvDocument>,
+    example_hints: Vec<(String, String)>,
+    example_hints_project: Option<PathBuf>,
     diff_open: bool,
     diff_cursor: usize,
     diff_left: Option<usize>,
@@ -189,6 +204,17 @@ impl EnvyApp {
         let hotkey_input = cx.new(|cx| InputState::new(window, cx).placeholder("ctrl+alt+e"));
         let project_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Find a project"));
         let key_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Find a key"));
+        let text_editor = cx.new(|cx| {
+            let mut state = EditorState::new(window, cx)
+                .line_number(true)
+                .folding(false)
+                .auto_close(false)
+                .smart_indent(false)
+                .language("dotenv");
+            state
+                .set_highlighter_factory(Rc::new(|_| Some(Box::new(DotenvHighlighter::new()))), cx);
+            state
+        });
         let focus = cx.focus_handle();
         let now = Instant::now();
         let mut app = Self {
@@ -220,6 +246,13 @@ impl EnvyApp {
             filter_query: String::new(),
             key_filter,
             key_query: String::new(),
+            editor_view: EditorView::Table,
+            text_editor,
+            text_editor_syncing: false,
+            text_editor_needs_sync: false,
+            text_session_before: None,
+            example_hints: Vec::new(),
+            example_hints_project: None,
             diff_open: false,
             diff_cursor: 0,
             diff_left: None,
@@ -302,6 +335,7 @@ impl EnvyApp {
         cx: &mut Context<Self>,
     ) {
         self.config = config;
+        self.editor_view = self.config.settings.editor_view;
         self.sort_recent = self.config.recent_projects.clone();
         self.booting = false;
         let hotkey = self.config.settings.global_hotkey.clone();
@@ -416,6 +450,27 @@ impl EnvyApp {
                 if let InputEvent::PressEnter { .. } = event {
                     let spec = state.read(cx).value().to_string();
                     this.commit_hotkey(spec, window, cx);
+                }
+            },
+        ));
+        self.input_subs.push(cx.subscribe_in(
+            &self.text_editor,
+            window,
+            |this, state, event, _window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    if this.text_editor_syncing || this.editor_view != EditorView::Text {
+                        return;
+                    }
+                    let text = state.read(cx).value().to_string();
+                    if let Some(open) = this.open.as_mut() {
+                        if this.text_session_before.is_none() {
+                            this.text_session_before = Some(open.document.clone());
+                        }
+                        if open.set_text_live(&text) {
+                            this.mark_edited();
+                            cx.notify();
+                        }
+                    }
                 }
             },
         ));
@@ -1173,13 +1228,17 @@ impl EnvyApp {
     }
 
     fn load_selected_file(&mut self, cx: &mut Context<Self>) {
+        self.refresh_example_hints(cx);
         let Some(path) = self.current_path() else {
             self.open = None;
+            self.text_session_before = None;
+            self.text_editor_needs_sync = true;
             return;
         };
         if self.open.as_ref().is_some_and(|open| open.path == path) {
             return;
         }
+        self.finalize_text_session();
         if let Some(open) = self.open.as_ref() {
             if open.is_dirty() {
                 self.enqueue_save(cx);
@@ -1273,6 +1332,9 @@ impl EnvyApp {
                         self.cursor = 0;
                         self.revealed.clear();
                         self.close_editor();
+                        self.text_session_before = None;
+                        self.text_editor_needs_sync = true;
+                        self.refresh_example_hints(cx);
                         if self.diff_open {
                             self.load_diff(cx);
                         }
@@ -1286,6 +1348,8 @@ impl EnvyApp {
                     }
                     Err(err) => {
                         self.open = None;
+                        self.text_session_before = None;
+                        self.text_editor_needs_sync = true;
                         self.status = format!("Could not open file: {err}");
                     }
                 }
@@ -1300,6 +1364,8 @@ impl EnvyApp {
                             open.replace_from_disk(fresh);
                         }
                         self.cursor = 0;
+                        self.text_session_before = None;
+                        self.text_editor_needs_sync = true;
                         self.sync_keys();
                         self.diff_stale = true;
                         self.status = "Reloaded from disk.".into();
@@ -1540,6 +1606,7 @@ impl EnvyApp {
     /// Save if needed, then quit. Returns false while a save is still running
     /// so the window stays up until the write finishes.
     pub fn close_requested(&mut self, cx: &mut Context<Self>) -> bool {
+        self.finalize_text_session();
         if self.open.as_ref().is_some_and(|open| open.is_dirty()) {
             self.enqueue_save(cx);
             self.io_queue.push_back(IoJob::Quit);
@@ -1552,6 +1619,7 @@ impl EnvyApp {
     }
 
     fn save_open(&mut self, cx: &mut Context<Self>) {
+        self.finalize_text_session();
         self.enqueue_save(cx);
         cx.notify();
     }
@@ -1561,8 +1629,236 @@ impl EnvyApp {
         self.io_queue
             .retain(|job| !matches!(job, IoJob::Load { .. }));
         self.diff_stale = true;
+        if self.editor_view == EditorView::Table {
+            self.text_editor_needs_sync = true;
+        }
         self.sync_keys();
         self.status = "Edited. Ctrl+S saves.".into();
+    }
+
+    fn finalize_text_session(&mut self) {
+        let Some(before) = self.text_session_before.take() else {
+            return;
+        };
+        if let Some(open) = self.open.as_mut() {
+            let text = open.document.serialize();
+            open.commit_text_snapshot(before, &text);
+        }
+    }
+
+    fn sync_text_editor_if_needed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.text_editor_needs_sync || self.editor_view != EditorView::Text {
+            return;
+        }
+        let text = self
+            .open
+            .as_ref()
+            .map(|open| open.document.serialize())
+            .unwrap_or_default();
+        self.text_editor_needs_sync = false;
+        self.text_editor_syncing = true;
+        self.text_editor
+            .update(cx, |editor, cx| editor.set_value(text, window, cx));
+        self.text_editor_syncing = false;
+    }
+
+    fn toggle_editor_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.open.is_none() {
+            self.status = "Open a file first.".into();
+            cx.notify();
+            return;
+        }
+        self.close_editor();
+        if self.diff_open {
+            self.clear_compare();
+        }
+        match self.editor_view {
+            EditorView::Table => {
+                self.editor_view = EditorView::Text;
+                self.text_session_before = self.open.as_ref().map(|open| open.document.clone());
+                self.text_editor_needs_sync = true;
+                self.sync_text_editor_if_needed(window, cx);
+                let handle = self.text_editor.focus_handle(cx);
+                window.focus(&handle, cx);
+            }
+            EditorView::Text => {
+                self.finalize_text_session();
+                self.editor_view = EditorView::Table;
+                self.zone = Zone::Keys;
+                let len = self.visible_entry_nodes().len();
+                if self.cursor >= len {
+                    self.cursor = len.saturating_sub(1);
+                }
+                self.focus_self(window, cx);
+            }
+        }
+        self.config.settings.editor_view = self.editor_view;
+        self.persist_config(cx);
+        cx.notify();
+    }
+
+    fn refresh_example_hints(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.project_ix.and_then(|ix| self.projects.get(ix)) else {
+            self.example_hints.clear();
+            self.example_hints_project = None;
+            return;
+        };
+        let root = project.root.clone();
+        if self.example_hints_project.as_ref() == Some(&root) {
+            return;
+        }
+        self.example_hints_project = Some(root.clone());
+        self.example_hints.clear();
+        let Some(example_path) = project
+            .files
+            .iter()
+            .find(|file| is_example_filename(&file.name))
+            .map(|file| file.path.clone())
+        else {
+            return;
+        };
+        cx.spawn(async move |this, async_cx| {
+            let hints = async_cx
+                .background_executor()
+                .spawn(async move {
+                    let Ok(raw) = std::fs::read_to_string(&example_path) else {
+                        return Vec::new();
+                    };
+                    let doc = EnvDocument::parse(&raw);
+                    let mut pairs = Vec::new();
+                    let mut seen = HashSet::new();
+                    for (_, entry) in doc.entries() {
+                        if !entry.disabled && seen.insert(entry.key.clone()) {
+                            pairs.push((entry.key.clone(), entry.value.clone()));
+                        }
+                    }
+                    for (_, entry) in doc.entries() {
+                        if entry.disabled && seen.insert(entry.key.clone()) {
+                            pairs.push((entry.key.clone(), entry.value.clone()));
+                        }
+                    }
+                    pairs
+                })
+                .await;
+            let _ = this.update(async_cx, |view, cx| {
+                if view.example_hints_project.as_ref() != Some(&root) {
+                    return;
+                }
+                view.example_hints = hints;
+                if let Some(query) = view
+                    .editor
+                    .as_ref()
+                    .and_then(|editor| editor.key.as_ref())
+                    .map(|input| input.read(cx).value().to_string())
+                {
+                    view.refresh_editor_suggestions(&query);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn compute_suggestions(&self, query: &str) -> Vec<KeySuggestion> {
+        let Some(open) = &self.open else {
+            return Vec::new();
+        };
+        let rename_node = self
+            .editor
+            .as_ref()
+            .filter(|editor| matches!(editor.kind, EditKind::Rename))
+            .and_then(|editor| editor.node);
+        let current_keys: Vec<String> = open
+            .document
+            .entries()
+            .filter(|(idx, _)| Some(*idx) != rename_node)
+            .map(|(_, entry)| entry.key.clone())
+            .collect();
+
+        suggest_keys(
+            &self.projects,
+            self.project_ix,
+            Some(open.path.as_path()),
+            &current_keys,
+            &self.example_hints,
+            query,
+            8,
+        )
+    }
+
+    fn refresh_editor_suggestions(&mut self, query: &str) {
+        let suggestions = self.compute_suggestions(query);
+        if let Some(editor) = self.editor.as_mut() {
+            editor.suggestions_open = !suggestions.is_empty();
+            editor.suggestions = suggestions;
+            editor.suggestion_ix = 0;
+        }
+    }
+
+    fn key_editor_focused(&self, window: &Window, cx: &App) -> bool {
+        self.editor
+            .as_ref()
+            .and_then(|editor| editor.key.as_ref())
+            .is_some_and(|input| input.focus_handle(cx).is_focused(window))
+    }
+
+    fn move_suggestion(&mut self, delta: isize) {
+        let Some(editor) = self.editor.as_mut() else {
+            return;
+        };
+        let len = editor.suggestions.len();
+        if len == 0 {
+            return;
+        }
+        editor.suggestion_ix =
+            (editor.suggestion_ix as isize + delta).rem_euclid(len as isize) as usize;
+    }
+
+    fn accept_suggestion(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((key, hint, tag, key_input, value_input)) = self.editor.as_ref().and_then(|ed| {
+            let suggestion = ed.suggestions.get(index)?;
+            Some((
+                suggestion.key.clone(),
+                suggestion.example_hint.clone(),
+                ed.kind_tag(),
+                ed.key.clone()?,
+                ed.value.clone(),
+            ))
+        }) else {
+            return false;
+        };
+        key_input.update(cx, |input, cx| input.set_value(key.clone(), window, cx));
+        if matches!(tag, EditTag::New) {
+            if let Some(hint) = hint.filter(|value| !value.is_empty()) {
+                let current_val = value_input.read(cx).value().to_string();
+                if current_val.is_empty() {
+                    if is_safe_default(&hint) {
+                        value_input.update(cx, |input, cx| input.set_value(hint, window, cx));
+                    } else {
+                        value_input.update(cx, |input, cx| input.set_placeholder(hint, window, cx));
+                    }
+                }
+            }
+        }
+        if let Some(editor) = self.editor.as_mut() {
+            editor.suggestions_open = false;
+        }
+        match tag {
+            EditTag::New => {
+                self.focus_value_editor(window, cx);
+                cx.notify();
+            }
+            EditTag::Rename => {
+                self.commit_editor_key(key, window, cx);
+            }
+            EditTag::Value => {}
+        }
+        true
     }
 
     fn sync_keys(&mut self) {
@@ -1855,6 +2151,9 @@ impl EnvyApp {
             cx.notify();
             return;
         }
+        if self.editor_view == EditorView::Text {
+            self.toggle_editor_view(window, cx);
+        }
         self.overlay = Overlay::None;
         self.open_editor(
             EditKind::New,
@@ -1864,6 +2163,7 @@ impl EnvyApp {
             window,
             cx,
         );
+        self.key_scroll.scroll_to_bottom();
     }
 
     fn open_editor(
@@ -1876,6 +2176,7 @@ impl EnvyApp {
         cx: &mut Context<Self>,
     ) {
         self.close_editor();
+        let initial_query = key.clone().unwrap_or_default();
         let key_input = key.map(|text| {
             cx.new(|cx| {
                 InputState::new(window, cx)
@@ -1893,8 +2194,13 @@ impl EnvyApp {
             self.edit_subs.push(cx.subscribe_in(
                 key_input,
                 window,
-                |this, input, event, window, cx| {
-                    if let InputEvent::PressEnter { .. } = event {
+                |this, input, event, window, cx| match event {
+                    InputEvent::Change => {
+                        let query = input.read(cx).value().to_string();
+                        this.refresh_editor_suggestions(&query);
+                        cx.notify();
+                    }
+                    InputEvent::PressEnter { .. } => {
                         let rename = matches!(
                             this.editor.as_ref().map(|editor| editor.kind_tag()),
                             Some(EditTag::Rename)
@@ -1906,6 +2212,7 @@ impl EnvyApp {
                             this.focus_value_editor(window, cx);
                         }
                     }
+                    InputEvent::Focus | InputEvent::Blur => {}
                 },
             ));
         }
@@ -1925,8 +2232,12 @@ impl EnvyApp {
             value: value_input,
             node,
             kind,
+            suggestions: Vec::new(),
+            suggestion_ix: 0,
+            suggestions_open: false,
         });
         if focus_key {
+            self.refresh_editor_suggestions(&initial_query);
             self.focus_key_editor(window, cx);
         } else {
             self.focus_value_editor(window, cx);
@@ -2222,6 +2533,7 @@ impl EnvyApp {
     }
 
     fn undo(&mut self, cx: &mut Context<Self>) {
+        self.finalize_text_session();
         let Some(open) = self.open.as_mut() else {
             return;
         };
@@ -2230,6 +2542,7 @@ impl EnvyApp {
             cx.notify();
             return;
         }
+        self.text_editor_needs_sync = true;
         self.sync_keys();
         self.status = if self.open.as_ref().is_some_and(|open| open.is_dirty()) {
             "Undone. Ctrl+S saves.".into()
@@ -2240,12 +2553,14 @@ impl EnvyApp {
     }
 
     fn redo(&mut self, cx: &mut Context<Self>) {
+        self.finalize_text_session();
         let Some(open) = self.open.as_mut() else {
             return;
         };
         if !open.redo() {
             return;
         }
+        self.text_editor_needs_sync = true;
         self.sync_keys();
         self.status = if self.open.as_ref().is_some_and(|open| open.is_dirty()) {
             "Redone. Ctrl+S saves.".into()
@@ -2569,6 +2884,51 @@ impl EnvyApp {
         if mods.control || mods.alt || mods.platform {
             return;
         }
+        let suggest_active = self.key_editor_focused(window, cx)
+            && self
+                .editor
+                .as_ref()
+                .is_some_and(|editor| editor.suggestions_open && !editor.suggestions.is_empty());
+        if suggest_active {
+            match key {
+                "down" => {
+                    self.move_suggestion(1);
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+                "up" => {
+                    self.move_suggestion(-1);
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+                "tab" | "enter" => {
+                    let ix = self
+                        .editor
+                        .as_ref()
+                        .map(|editor| editor.suggestion_ix)
+                        .unwrap_or(0);
+                    if self.accept_suggestion(ix, window, cx) {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
+                "escape" => {
+                    if let Some(editor) = self.editor.as_mut() {
+                        editor.suggestions_open = false;
+                    }
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+                _ => {}
+            }
+        }
         match key {
             "tab" if self.editor.is_some() => {
                 self.commit_focused_field(window, cx);
@@ -2763,6 +3123,7 @@ impl Focusable for EnvyApp {
 
 impl Render for EnvyApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_text_editor_if_needed(window, cx);
         let p = Palette::for_mode(cx.theme().mode.is_dark());
         let mono = cx.theme().mono_font_family.clone();
         let ui_font = cx.theme().font_family.clone();
@@ -2821,6 +3182,8 @@ impl Render for EnvyApp {
             let toolbar = self.render_toolbar(p, missing.len(), cx);
             let body = if self.diff_open {
                 self.render_diff_view(p, mono.clone(), cx)
+            } else if self.editor_view == EditorView::Text {
+                self.render_text_editor(p, mono.clone(), cx)
             } else {
                 self.render_key_table(p, mono.clone(), window, cx)
             };
@@ -2894,6 +3257,9 @@ impl Render for EnvyApp {
             }))
             .on_action(cx.listener(|this, _: &ToggleDiff, _, cx| this.toggle_diff(cx)))
             .on_action(cx.listener(|this, _: &CycleDiff, _, cx| this.cycle_diff(cx)))
+            .on_action(cx.listener(|this, _: &ToggleEditorView, window, cx| {
+                this.toggle_editor_view(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &NewFromExample, _, cx| this.new_from_example(cx)))
             .on_action(
                 cx.listener(|this, _: &AddFolder, window, cx| this.open_add_folder(window, cx)),
@@ -3513,6 +3879,7 @@ impl EnvyApp {
         let entity = cx.entity();
         let show_all = self.show_all;
         let diff_open = self.diff_open;
+        let text_mode = !diff_open && self.editor_view == EditorView::Text;
         let dirty = self.open.as_ref().is_some_and(|open| open.is_dirty());
         let can_undo = self.open.as_ref().is_some_and(|open| open.can_undo());
         let can_redo = self.open.as_ref().is_some_and(|open| open.can_redo());
@@ -3621,6 +3988,50 @@ impl EnvyApp {
                 );
             }
             left
+        } else if text_mode {
+            let line_count = self
+                .open
+                .as_ref()
+                .map(|open| open.document.nodes.len())
+                .unwrap_or(0);
+            let line_label = if line_count == 1 {
+                "1 line".to_string()
+            } else {
+                format!("{line_count} lines")
+            };
+            h_flex()
+                .items_center()
+                .gap(px(8.))
+                .flex_1()
+                .min_w(px(0.))
+                .child(
+                    h_flex()
+                        .h(px(24.))
+                        .px(px(8.))
+                        .gap(px(5.))
+                        .items_center()
+                        .rounded(px(999.))
+                        .bg(p.bg_kbd)
+                        .border_1()
+                        .border_color(p.border_hairline)
+                        .text_size(px(11.5))
+                        .line_height(px(15.))
+                        .text_color(p.fg_secondary)
+                        .child(
+                            Icon::new(IconName::Eye)
+                                .size(px(12.))
+                                .text_color(p.fg_tertiary),
+                        )
+                        .child("Plain text · values visible"),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .line_height(px(16.))
+                        .text_color(p.fg_tertiary)
+                        .whitespace_nowrap()
+                        .child(line_label),
+                )
         } else {
             let total = self.entry_nodes().len();
             let shown = self.visible_entry_nodes().len();
@@ -3751,8 +4162,8 @@ impl EnvyApp {
                     } else {
                         "Show all values"
                     },
-                    show_all,
-                    false,
+                    show_all && !text_mode,
+                    text_mode,
                     p,
                 )
                 .tooltip_with_action(
@@ -3768,6 +4179,39 @@ impl EnvyApp {
                     let entity = entity.clone();
                     move |_, _, cx| {
                         entity.update(cx, |this, cx| this.toggle_show_all(cx));
+                    }
+                }),
+            )
+            .child(
+                toolbar_icon_button(
+                    "tb-view",
+                    if text_mode {
+                        IconName::List
+                    } else {
+                        IconName::FileCode
+                    },
+                    if text_mode {
+                        "Table view"
+                    } else {
+                        "Plain text view"
+                    },
+                    text_mode,
+                    !has_open,
+                    p,
+                )
+                .tooltip_with_action(
+                    if text_mode {
+                        "Table view"
+                    } else {
+                        "Plain text view"
+                    },
+                    &ToggleEditorView,
+                    Some("Envy"),
+                )
+                .on_click({
+                    let entity = entity.clone();
+                    move |_, window, cx| {
+                        entity.update(cx, |this, cx| this.toggle_editor_view(window, cx));
                     }
                 }),
             )
@@ -3898,7 +4342,7 @@ impl EnvyApp {
                 div()
                     .w(KEY_COL_W)
                     .flex_shrink_0()
-                    .pl(px(26.))
+                    .pl(px(30.))
                     .pr(px(16.))
                     .text_size(px(11.))
                     .line_height(px(14.))
@@ -4096,12 +4540,14 @@ impl EnvyApp {
                         full_key_tip.push_str(desc);
                     }
 
-                    let toggle_btn = div()
+                    let mut toggle_btn = div()
                         .id(SharedString::from(format!("toggle-{node}")))
-                        .w(px(20.))
-                        .h(px(20.))
+                        .w(px(24.))
+                        .h(px(24.))
                         .flex_shrink_0()
-                        .rounded(px(4.))
+                        .rounded(px(5.))
+                        .border_1()
+                        .border_color(p.bg_canvas.opacity(0.))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -4111,11 +4557,12 @@ impl EnvyApp {
                         } else {
                             "Turn off · Ctrl+/"
                         }))
-                        .hover(move |style| style.bg(p.bg_hover))
-                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                        .hover(move |style| style.bg(p.accent_subtle).border_color(p.accent_ring))
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                             cx.stop_propagation();
                             toggle_entity.update(cx, |this, cx| {
                                 this.zone = Zone::Keys;
+                                this.focus_self(window, cx);
                                 this.toggle_disabled_node(node, cx);
                             });
                         })
@@ -4125,15 +4572,18 @@ impl EnvyApp {
                             } else {
                                 IconName::ToggleRight
                             })
-                            .size(px(14.))
+                            .size(px(15.))
                             .text_color(if disabled {
-                                p.fg_tertiary.opacity(0.65)
-                            } else if selected && keys_focused {
-                                p.accent
+                                p.fg_secondary
                             } else {
-                                p.accent.opacity(0.62)
+                                p.accent
                             }),
                         );
+                    if !disabled && !(selected && keys_focused) {
+                        toggle_btn = toggle_btn
+                            .invisible()
+                            .group_hover(key_group.clone(), |style| style.visible());
+                    }
 
                     let key_cell = if show_rename_input {
                         if let Some(key_input) = self.editor.as_ref().and_then(|e| e.key.as_ref()) {
@@ -4171,8 +4621,13 @@ impl EnvyApp {
                                 .child(key.clone()),
                         );
 
-                        let mut text_col =
-                            v_flex().flex_1().min_w(px(0.)).gap(px(1.)).child(key_line);
+                        let mut text_col = v_flex()
+                            .id(SharedString::from(format!("key-text-{node}")))
+                            .flex_1()
+                            .min_w(px(0.))
+                            .gap(px(1.))
+                            .tooltip(hover_tip(full_key_tip))
+                            .child(key_line);
                         if let Some(desc) = description {
                             let one_line = desc.replace('\n', " · ");
                             text_col = text_col.child(
@@ -4197,8 +4652,7 @@ impl EnvyApp {
                             .pr(px(14.))
                             .min_w(px(0.))
                             .gap(px(6.))
-                            .items_center()
-                            .tooltip(hover_tip(full_key_tip));
+                            .items_center();
                         if related {
                             cell = cell.pl(px(10.)).child(
                                 Icon::new(IconName::CornerDownRight)
@@ -4319,6 +4773,13 @@ impl EnvyApp {
 
                     row = row.child(key_cell).child(value_cell).child(actions);
                     table = table.child(row);
+                    if show_rename_input {
+                        if let Some(dropdown) =
+                            self.render_suggestions_dropdown(p, mono.clone(), cx)
+                        {
+                            table = table.child(dropdown);
+                        }
+                    }
                 }
             }
         }
@@ -4366,6 +4827,9 @@ impl EnvyApp {
                             .child(kbd_chip("Enter", p, mono.clone())),
                     );
                 table = table.child(row);
+                if let Some(dropdown) = self.render_suggestions_dropdown(p, mono.clone(), cx) {
+                    table = table.child(dropdown);
+                }
             }
         } else if self.open.is_some() && (has_any_entries || !query_active) {
             let add_entity = entity.clone();
@@ -4466,6 +4930,195 @@ impl EnvyApp {
                 .overflow_hidden()
                 .child(table)
                 .child(Scrollbar::vertical(&self.key_scroll).mode(ScrollbarMode::Hover)),
+        )
+    }
+
+    fn render_suggestions_dropdown(
+        &self,
+        p: Palette,
+        mono: SharedString,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui_kit::Div> {
+        let editor = self.editor.as_ref()?;
+        if !editor.suggestions_open || editor.suggestions.is_empty() {
+            return None;
+        }
+        let entity = cx.entity();
+        let active_ix = editor.suggestion_ix;
+
+        let mut list = v_flex()
+            .ml(px(16.))
+            .mt(px(4.))
+            .mb(px(6.))
+            .w(KEY_COL_W + px(110.))
+            .flex_shrink_0()
+            .rounded(px(8.))
+            .bg(p.bg_surface)
+            .border_1()
+            .border_color(p.border_control)
+            .shadow_md()
+            .overflow_hidden();
+
+        let mut rows = v_flex().p(px(4.)).gap(px(1.));
+        for (ix, suggestion) in editor.suggestions.iter().enumerate() {
+            let selected = ix == active_ix;
+            let pick_entity = entity.clone();
+            let (badge_bg, badge_color) = match suggestion.source {
+                SuggestionSource::Sibling => (p.accent_subtle, p.accent),
+                SuggestionSource::OtherProject => (p.bg_kbd, p.fg_secondary),
+                SuggestionSource::Common => (p.bg_kbd, p.fg_tertiary),
+            };
+            let mut item = h_flex()
+                .id(SharedString::from(format!("key-suggest-{ix}")))
+                .h(px(28.))
+                .px(px(8.))
+                .gap(px(8.))
+                .rounded(px(5.))
+                .items_center()
+                .justify_between()
+                .cursor_pointer()
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    cx.stop_propagation();
+                    pick_entity.update(cx, |this, cx| {
+                        this.accept_suggestion(ix, window, cx);
+                    });
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .font_family(mono.clone())
+                        .text_size(px(12.5))
+                        .line_height(px(16.))
+                        .truncate()
+                        .text_color(if selected {
+                            p.fg_primary
+                        } else {
+                            p.fg_secondary
+                        })
+                        .child(suggestion.key.clone()),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .px(px(6.))
+                        .py(px(1.))
+                        .rounded(px(4.))
+                        .bg(badge_bg)
+                        .text_size(px(10.5))
+                        .line_height(px(14.))
+                        .text_color(badge_color)
+                        .child(suggestion.origin.clone()),
+                );
+            if selected {
+                item = item.bg(p.bg_selected_accent);
+            } else {
+                item = item.hover(move |style| style.bg(p.bg_hover));
+            }
+            rows = rows.child(item);
+        }
+
+        let footer = h_flex()
+            .px(px(10.))
+            .py(px(5.))
+            .gap(px(10.))
+            .items_center()
+            .bg(p.bg_chrome)
+            .border_t_1()
+            .border_color(p.border_hairline)
+            .child(footer_hint("↑↓", "Select", p, mono.clone()))
+            .child(footer_hint("Tab", "Pick", p, mono.clone()))
+            .child(footer_hint("Esc", "Hide", p, mono));
+
+        list = list.child(rows).child(footer);
+        Some(list)
+    }
+
+    fn render_text_editor(
+        &self,
+        p: Palette,
+        mono: SharedString,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        let mut pane = v_flex()
+            .flex_1()
+            .min_h(px(0.))
+            .w_full()
+            .bg(p.bg_canvas)
+            .overflow_hidden();
+
+        if self.open.as_ref().is_some_and(|open| open.external_change) {
+            let reload_entity = cx.entity();
+            let keep_entity = cx.entity();
+            pane = pane.child(
+                h_flex()
+                    .h(px(36.))
+                    .px(px(16.))
+                    .gap(px(12.))
+                    .items_center()
+                    .justify_between()
+                    .bg(p.warning_bg)
+                    .border_b_1()
+                    .border_color(p.warning_border)
+                    .child(
+                        h_flex()
+                            .gap(px(8.))
+                            .items_center()
+                            .child(
+                                Icon::new(IconName::Info)
+                                    .size(px(14.))
+                                    .text_color(p.warning),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .line_height(px(16.))
+                                    .text_color(p.fg_primary)
+                                    .child("This file changed on disk."),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap(px(6.))
+                            .items_center()
+                            .child(
+                                Button::new("ext-reload-text")
+                                    .outline()
+                                    .xsmall()
+                                    .label("Reload")
+                                    .on_click(move |_, _, cx| {
+                                        reload_entity
+                                            .update(cx, |this, cx| this.reload_external(cx));
+                                    }),
+                            )
+                            .child(
+                                Button::new("ext-keep-text")
+                                    .ghost()
+                                    .xsmall()
+                                    .label("Keep mine")
+                                    .on_click(move |_, window, cx| {
+                                        keep_entity.update(cx, |this, cx| this.cancel(window, cx));
+                                    }),
+                            ),
+                    ),
+            );
+        }
+
+        pane.child(
+            div()
+                .flex_1()
+                .min_h(px(0.))
+                .w_full()
+                .px(px(8.))
+                .py(px(6.))
+                .font_family(mono)
+                .text_size(px(13.))
+                .child(
+                    CodeEditor::new(&self.text_editor)
+                        .appearance(false)
+                        .bordered(false)
+                        .h_full(),
+                ),
         )
     }
 
@@ -4590,6 +5243,13 @@ impl EnvyApp {
                 ("Space", "Reveal"),
                 ("]", "Other file"),
                 ("Esc", "Close"),
+            ]
+        } else if self.editor_view == EditorView::Text {
+            &[
+                ("Ctrl+S", "Save"),
+                ("Ctrl+Z", "Undo"),
+                ("Ctrl+E", "Table"),
+                ("?", "Shortcuts"),
             ]
         } else {
             match self.zone {
@@ -5879,6 +6539,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Space", "Show the value"),
     ("a", "Show every value"),
     ("Ctrl+/", "Turn key on or off"),
+    ("Ctrl+E", "Switch table / plain text"),
     ("n", "New key"),
     ("Ctrl+S", "Save"),
     ("Ctrl+Z", "Undo"),

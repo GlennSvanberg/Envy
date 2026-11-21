@@ -19,6 +19,14 @@ pub enum ThemeSetting {
     Dark,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum EditorView {
+    #[default]
+    Table,
+    Text,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
@@ -30,6 +38,9 @@ pub struct Settings {
     /// Chord such as `ctrl+alt+e`. Parsed by [`crate::hotkey::Hotkey`].
     #[serde(default = "default_hotkey")]
     pub global_hotkey: String,
+    /// Last chosen view mode for editing files (`table` or `text`).
+    #[serde(default)]
+    pub editor_view: EditorView,
 }
 
 fn default_clear_clipboard() -> bool {
@@ -46,6 +57,7 @@ impl Default for Settings {
             theme: ThemeSetting::System,
             clear_clipboard: true,
             global_hotkey: default_hotkey(),
+            editor_view: EditorView::Table,
         }
     }
 }
@@ -164,6 +176,7 @@ mod tests {
         config.folders.push(PathBuf::from("/work/app"));
         config.settings.theme = ThemeSetting::Dark;
         config.settings.clear_clipboard = false;
+        config.settings.editor_view = EditorView::Text;
         config
             .projects
             .insert("billing".into(), PathBuf::from("/work/billing"));
@@ -180,6 +193,7 @@ mod tests {
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains("clear_clipboard = false"));
         assert!(text.contains("theme = \"dark\""));
+        assert!(text.contains("editor_view = \"text\""));
         assert!(!text.contains("value"));
         assert!(!text.contains("SECRET"));
         let loaded = Config::load_from(&path);

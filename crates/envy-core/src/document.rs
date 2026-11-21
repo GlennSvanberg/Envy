@@ -77,6 +77,11 @@ impl Entry {
         self.raw.is_none()
     }
 
+    /// Original unmodified source slice when this entry has not been edited.
+    pub fn raw_str(&self) -> Option<&str> {
+        self.raw.as_deref()
+    }
+
     /// Replace the logical value and drop the original slice so the next save
     /// rewrites this entry only.
     pub fn set_value(&mut self, value: impl Into<String>) {

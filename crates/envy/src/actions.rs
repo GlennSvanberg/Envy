@@ -24,6 +24,7 @@ actions!(
         Refresh,
         ToggleDiff,
         CycleDiff,
+        ToggleEditorView,
         NewFromExample,
         AddFolder,
         OpenSettings,
@@ -68,12 +69,15 @@ pub fn bind(cx: &mut gpui_kit::App) {
         KeyBinding::new("backspace", DeleteKey, list),
         // `ctrl` is the shortcut modifier. In this GPUI, `cmd` is the
         // Windows/Super key, not Control.
-        KeyBinding::new("ctrl-z", UndoChange, Some("Envy")),
-        KeyBinding::new("ctrl-y", RedoChange, Some("Envy")),
-        KeyBinding::new("ctrl-shift-z", RedoChange, Some("Envy")),
+        // Undo/redo stay out of text inputs so inline editors and the plain
+        // text code editor use their native text undo stacks.
+        KeyBinding::new("ctrl-z", UndoChange, list),
+        KeyBinding::new("ctrl-y", RedoChange, list),
+        KeyBinding::new("ctrl-shift-z", RedoChange, list),
         KeyBinding::new("shift-/", ShowShortcuts, list),
         KeyBinding::new("?", ShowShortcuts, list),
         KeyBinding::new("ctrl-s", Save, Some("Envy")),
+        KeyBinding::new("ctrl-e", ToggleEditorView, Some("Envy")),
         KeyBinding::new("ctrl-r", Refresh, Some("Envy")),
         KeyBinding::new("d", ToggleDiff, list),
         KeyBinding::new("]", CycleDiff, list),

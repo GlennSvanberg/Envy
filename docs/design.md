@@ -157,10 +157,12 @@ Two font families only:
 ### 5.3 Workspace Toolbar
 - Height `40 px`, `px(12 px)`, `bg.canvas`, `border_b_1` (`border.hairline`), `items_center`, `justify_between`.
 - **Left region (`gap(8 px)`):**
-  - *Edit mode:*
+  - *Edit mode (table):*
     - Key filter `Input` (`w(220 px)`, `h(28 px)`, `Search` icon prefix, `cleanable(true)`, placeholder `"Find a key"`).
     - Key count (`12 px`, `fg.tertiary`): `"6 keys"` (or `"2 of 6"` while filtering).
     - Missing-keys drift pill (shown only when `missing.len() > 0`): calm interactive amber pill (`bg: status.warning_bg`, `border: 1 px status.warning_border`, `text: status.warning`, `h(24 px)`, `px(8 px)`, `rounded(999 px)`, `12 px` icon + `"2 missing vs .env.example"`). Clicking opens Compare with `.env.example`.
+  - *Edit mode (plain text):*
+    - Quiet notice pill (`bg.kbd`, `1 px border.hairline`, `Eye` icon + `"Plain text · values visible"`) and line count.
   - *Compare mode:*
     - Close compare icon button (`X`, tooltip `"Close compare · Esc"`).
     - Neutral summary chips (`bg.kbd`, `1 px border.hairline`, `fg.secondary` text) each pairing a small `11 px` colored Lucide glyph (`EqualNot`, `Plus`, `Minus`, or `Check`) with the count (`2 differ`, `3 left only`, `6 right only`, or `Files match`).
@@ -172,7 +174,8 @@ Two font families only:
     - `Redo2` — Redo (`Ctrl+Y`), disabled state when `!can_redo`
     - `Save` — Save (`Ctrl+S`), accented fill (`accent.subtle`, `1 px accent.ring`, icon in `accent`) when dirty; disabled when clean
   - *View & file group:*
-    - `Eye` / `EyeOff` — Show/Hide all values (`A`), selected tint when active
+    - `Eye` / `EyeOff` — Show/Hide all values (`A`), selected tint when active (disabled in plain text view)
+    - `FileCode` / `List` — Switch between Table and Plain text view (`Ctrl+E`), selected tint when in plain text view, preference remembered in config
     - `Columns2` — Compare two files (`D`), selected tint when active, disabled when `< 2` files
     - `FilePlus` — New `.env.local` from `.env.example` (`Ctrl+Shift+N`), disabled when no example exists
   - *Utility group:*
@@ -183,12 +186,12 @@ Two font families only:
 - Edge-to-edge scrollable table with no outer frame border, flowing cleanly across the canvas like Zed panels.
 - **External disk change banner (conditional):** Compact `36 px` row with `status.danger_bg` fill, `border_b_1` (`status.danger_border`), `TriangleAlert` icon, concise copy `"This file changed on disk."`, and two inline compact buttons: `Reload` (`R`) and `Keep mine` (`Esc`).
 - **Column header (`28 px`, `px(16 px)`, `border_b_1`, `bg.chrome` @ 55%):**
-  - `KEY` — `w(256 px)`, `flex_shrink_0`, `pr(16 px)`
+  - `KEY` — `w(276 px)`, `flex_shrink_0`, `pl(30 px)`, `pr(16 px)`
   - `VALUE` — `flex_1`, `min_w(0)`
   - Actions spacer — `w(64 px)`, `flex_shrink_0`
 - **Key rows (`32 px` single-line, `44 px` with description, `mx(8 px)`, `px(7 px)` + `1 px` border = `16 px` inner edge, `rounded(6 px)`):**
   - Subtle hover (`bg.hover`), selected unfocused (`bg.selected_muted`, no border), selected focused (`bg.selected_accent` + `1 px accent.ring`, `fg.primary` text).
-  - **Key column (`w(276 px)`):** Leading `20 × 20 px` on/off toggle icon (`ToggleRight` in quiet `accent` for active entries, `ToggleLeft` in `fg.tertiary` for commented-out/disabled entries; tooltip `"Turn off · Ctrl+/"` / `"Turn on · Ctrl+/"`). When both an active and disabled line exist for the same key, the disabled row sits directly beneath the active row with a `10 px` indent and `11 px` `CornerDownRight` indicator (never merged). Key name in mono (`13 px / 18 px`, `fg.primary`, or `fg.tertiary` when disabled), optional `export ` prefix in `fg.tertiary`, and optional description comment subline (`11 px / 14 px`, `fg.tertiary`, full multi-line text in tooltip).
+  - **Key column (`w(276 px)`):** Leading `24 × 24 px` on/off toggle button (`ToggleRight` in `accent` for active entries, `ToggleLeft` in `fg.secondary` for commented-out/disabled entries; distinct `accent.subtle` + `accent.ring` hover state; tooltip `"Turn off · Ctrl+/"` / `"Turn on · Ctrl+/"`). Always visible on disabled rows; shown on active rows only when hovered or selected+focused to keep the table calm. When both an active and disabled line exist for the same key, the disabled row sits directly beneath the active row with a `10 px` indent and `11 px` `CornerDownRight` indicator (never merged). Key name in mono (`13 px / 18 px`, `fg.primary`, or `fg.tertiary` when disabled), optional `export ` prefix in `fg.tertiary`, and optional description comment subline (`11 px / 14 px`, `fg.tertiary`, full multi-line text in tooltip).
   - **Section dividers (`28 px`):** Standalone comments and decorated section headers (`# --- Database ---`) render as discreet non-selectable dividers (`11 px` `fg.tertiary` label + `1 px` `border.hairline`) in file order.
   - **Value column:** `flex_1`, `min_w(0)`, `mono`, `13 px / 18 px`, `truncate()`, dimmed when the row is disabled.
     - Masked: capped at **12 dots** (`•` repeated `len.min(12)`), rendered in `fg.secondary` so rows stay calm and never overflow or leak exact long secret lengths.
@@ -196,7 +199,12 @@ Two font families only:
     - Empty: `"empty"` in `fg.tertiary`.
   - **Actions column (`w(64 px)`, `flex_shrink_0`, `justify_end`, `gap(4 px)`):** `Copy` (`Copy`) and `Reveal/Hide` (`Eye` / `EyeOff`) `24 × 24 px` icon buttons. Visible when the row is selected (focused) or hovered.
   - **Tail action:** A quiet `+ Add key` ghost row (`32 px`, `fg.tertiary`) sits below the last key so the table finishes cleanly above open canvas space.
-  - **Inline editing (`Value`, `Rename`, `New`):** Renders inside the exact same `276 px` / `flex_1` / `64 px` column geometry with a monospace `Input` and no outer double-border.
+  - **Inline editing (`Value`, `Rename`, `New`) & key-name autocomplete:** Renders inside the exact same `276 px` / `flex_1` / `64 px` column geometry with a monospace `Input` and no outer double-border. When adding a key or renaming a key, an elevated suggestion list appears directly below the row ranked by: sibling env files in the same project missing from this file (`.env.example` first), then keys from other discovered projects, then common env key names. Navigable with `↑`/`↓`/`Tab`/`Enter`/`Esc` or mouse click; picking a `.env.example` key prefills safe defaults or sets non-default templates as the value placeholder without ever copying secrets from non-example files.
+
+### 5.4b Plain Text Editor View
+- Toggled via the toolbar `FileCode` / `List` icon button or `Ctrl+E`. Choice is persisted in config (`editor_view = "table" | "text"`).
+- Edge-to-edge monospace code editor with line numbers, `.env` syntax highlighting (keys, values, strings, numbers, booleans, `${VAR}` interpolations, comments, disabled lines), native text undo/redo, and `Ctrl+S` save.
+- Unsaved changes stay losslessly synced when switching between Table and Plain text views; invalid lines stay verbatim and surface through the footer's unreadable-lines indicator.
 
 ### 5.5 Two-Column Compare View
 - Replaces the key list area while keeping the file tab bar, toolbar, and footer intact. Edge-to-edge with no outer boxed outline.

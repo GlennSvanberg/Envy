@@ -19,8 +19,11 @@ pub mod paste;
 pub mod scaffold;
 pub mod search;
 pub mod session;
+pub mod suggest;
 
-pub use config::{config_dir, config_path, sidebar_rank, Config, Settings, ThemeSetting};
+pub use config::{
+    config_dir, config_path, sidebar_rank, Config, EditorView, Settings, ThemeSetting,
+};
 pub use deeplink::Deeplink;
 pub use diff::{DiffKind, DiffReport, DiffRow};
 pub use discover::{
@@ -37,3 +40,4 @@ pub use paste::{apply_paste, plan_paste, PasteChange, PastePlan};
 pub use scaffold::from_example;
 pub use search::{search, SearchHit, SearchKind};
 pub use session::{inspect_disk, save_text, DiskNotice, OpenFile};
+pub use suggest::{common_env_keys, suggest_keys, KeySuggestion, SuggestionSource};

@@ -95,6 +95,33 @@ impl OpenFile {
         self.redo.clear();
     }
 
+    /// Update the in-memory document directly from plain-text edits without
+    /// pushing an undo snapshot per keystroke (used while the text editor owns
+    /// fine-grained undo/redo). Returns true when the text actually changed.
+    pub fn set_text_live(&mut self, text: &str) -> bool {
+        if self.document.serialize() == text {
+            return false;
+        }
+        self.document = EnvDocument::parse(text);
+        true
+    }
+
+    /// Commit a completed plain-text editing session into the document's undo
+    /// stack as one step. Returns true if the text differs from `before`.
+    pub fn commit_text_snapshot(&mut self, before: EnvDocument, after_text: &str) -> bool {
+        if before.serialize() == after_text {
+            self.document = before;
+            return false;
+        }
+        self.undo.push(before);
+        if self.undo.len() > UNDO_LIMIT {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+        self.document = EnvDocument::parse(after_text);
+        true
+    }
+
     pub fn apply_paste(&mut self, plan: &PastePlan) {
         self.mutate(|document| paste::apply_paste(document, plan));
     }
@@ -417,5 +444,54 @@ mod tests {
         if let Some(file) = std_time {
             let _ = file.set_modified(time);
         }
+    }
+
+    #[test]
+    fn text_and_document_sync_keeps_lossless_state_unreadable_lines_and_undo() {
+        let dir = scratch();
+        let path = dir.join(".env");
+        let original = "# --- DB ---\r\nDB_PORT=5432\r\n# DEBUG=true\r\n";
+        fs::write(&path, original).unwrap();
+        let mut open = OpenFile::load(&path).unwrap();
+        assert!(!open.is_dirty());
+
+        // Table edit -> text view serialization preserves CRLF and untouched lines.
+        open.mutate(|doc| {
+            doc.set_value("DB_PORT", "5433");
+        });
+        let before_text_mode = open.document.clone();
+        assert_eq!(
+            before_text_mode.serialize(),
+            "# --- DB ---\r\nDB_PORT=5433\r\n# DEBUG=true\r\n"
+        );
+        assert!(open.is_dirty());
+
+        // No-op live text sync returns false and leaves document untouched.
+        assert!(!open.set_text_live(&before_text_mode.serialize()));
+
+        // Edit in text mode, including an unreadable line and toggling DEBUG on.
+        let edited_text = "# --- DB ---\r\nDB_PORT=5433\r\nDEBUG=true\r\nbroken line\r\n";
+        assert!(open.set_text_live(edited_text));
+        assert!(open.is_dirty());
+        assert_eq!(open.document.value_of("DEBUG"), Some("true"));
+        assert_eq!(open.document.unreadable_lines().len(), 1);
+        assert_eq!(open.document.unreadable_lines()[0].line_number, 4);
+        assert_eq!(open.document.serialize(), edited_text);
+
+        // Switching back to table commits one undo step for the text session.
+        assert!(open.commit_text_snapshot(before_text_mode.clone(), edited_text));
+        assert_eq!(open.document.serialize(), edited_text);
+
+        // Undo rolls back the text session cleanly to the pre-text table edit.
+        assert!(open.undo());
+        assert_eq!(open.document.serialize(), before_text_mode.serialize());
+        assert!(open.document.unreadable_lines().is_empty());
+
+        // Second undo restores the exact original clean file bytes.
+        assert!(open.undo());
+        assert_eq!(open.document.serialize(), original);
+        assert!(!open.is_dirty());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
