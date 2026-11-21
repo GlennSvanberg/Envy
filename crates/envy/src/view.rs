@@ -4,9 +4,8 @@
 //! asked for. Secret values are rendered from memory and are never written to
 //! the status line.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use envy_core::discover::{default_file_index, is_example_filename, resolve_file, resolve_project};
@@ -14,8 +13,8 @@ use envy_core::document::Node;
 use envy_core::paste::{PasteChange, PastePlan};
 use envy_core::search::{SearchCommand, SearchHit, SearchKind};
 use envy_core::{
-    diff, from_example, is_env_key, plan_paste, search, Config, Deeplink, EnvDocument, OpenFile,
-    Project, ScanError, ThemeSetting,
+    attach_git_identity, diff, discover_files, from_example, is_env_key, plan_paste, save_text,
+    search, Config, Deeplink, EnvDocument, OpenFile, Project, ScanError, ThemeSetting,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -25,12 +24,12 @@ use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Selectable, Sizable, Them
 use gpui_kit::prelude::*;
 use gpui_kit::{
     div, px, rgb, size, AnyView, AnyWindowHandle, App, Bounds, ClipboardItem, Context, Entity,
-    FocusHandle, Focusable, KeyDownEvent, MouseButton, SharedString, Subscription, Task,
-    TitlebarOptions, Window, WindowBounds, WindowOptions,
+    FocusHandle, Focusable, KeyDownEvent, MouseButton, PathPromptOptions, SharedString,
+    Subscription, Task, TitlebarOptions, Window, WindowBounds, WindowOptions,
 };
 
 use crate::actions::*;
-use crate::hotkey_os::{self, Registration};
+use crate::hotkey_os;
 use crate::instance::Instance;
 
 const CLEAR_AFTER: Duration = Duration::from_secs(30);
@@ -91,12 +90,49 @@ pub struct EnvyApp {
     diff_ix: Option<usize>,
     diff_doc: Option<EnvDocument>,
     status: String,
-    hotkey: Option<Registration>,
     clear_token: u64,
     clear_task: Option<Task<()>>,
     poll_task: Option<Task<()>>,
-    scan_rx: Option<Receiver<(Vec<Project>, Vec<ScanError>)>>,
+    /// Config has not been read yet. The first frame paints before that.
+    booting: bool,
+    scanning: bool,
+    scan_epoch: u64,
+    io_epoch: u64,
+    save_seq: u64,
+    io_queue: VecDeque<IoJob>,
+    io_running: bool,
+    diff_epoch: u64,
+    diff_report: Option<diff::DiffReport>,
+    diff_stale: bool,
+    disk_check: bool,
+    last_disk: Instant,
+    config_dirty: bool,
+    config_saving: bool,
+    pending_launch: Option<String>,
+    pending_file: Option<PathBuf>,
+    pending_key: Option<String>,
     last_scan: Instant,
+    startup_logged: bool,
+    ui_ready: Duration,
+    config_load: Duration,
+}
+
+enum IoJob {
+    Save {
+        seq: u64,
+        epoch: u64,
+        path: PathBuf,
+        text: String,
+    },
+    Load {
+        epoch: u64,
+        path: PathBuf,
+    },
+    Reload {
+        epoch: u64,
+        path: PathBuf,
+    },
+    Quit,
 }
 
 impl EnvyApp {
@@ -106,22 +142,19 @@ impl EnvyApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let config = Config::load();
         let palette_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Projects, files, and keys"));
         let folder_input = cx.new(|cx| InputState::new(window, cx).placeholder("Folder path"));
-        let hotkey_input = cx.new(|cx| {
-            InputState::new(window, cx).default_value(config.settings.global_hotkey.clone())
-        });
-        let (projects, scan_errors) = envy_core::discover(&config.folders, &config);
+        let hotkey_input = cx.new(|cx| InputState::new(window, cx).placeholder("ctrl+alt+e"));
         let focus = cx.focus_handle();
+        let now = Instant::now();
         let mut app = Self {
             focus: focus.clone(),
             window: window.window_handle(),
             instance,
-            config,
-            projects,
-            scan_errors,
+            config: Config::default(),
+            projects: Vec::new(),
+            scan_errors: Vec::new(),
             project_ix: None,
             file_ix: None,
             open: None,
@@ -141,37 +174,97 @@ impl EnvyApp {
             diff_open: false,
             diff_ix: None,
             diff_doc: None,
-            status: String::new(),
-            hotkey: None,
+            status: "Starting…".into(),
             clear_token: 0,
             clear_task: None,
             poll_task: None,
-            scan_rx: None,
-            last_scan: Instant::now(),
+            booting: true,
+            scanning: false,
+            scan_epoch: 0,
+            io_epoch: 0,
+            save_seq: 0,
+            io_queue: VecDeque::new(),
+            io_running: false,
+            diff_epoch: 0,
+            diff_report: None,
+            diff_stale: false,
+            disk_check: false,
+            last_disk: now,
+            config_dirty: false,
+            config_saving: false,
+            pending_launch: launch,
+            pending_file: None,
+            pending_key: None,
+            last_scan: now,
+            startup_logged: false,
+            ui_ready: crate::STARTED
+                .get()
+                .map(|started| started.elapsed())
+                .unwrap_or_default(),
+            config_load: Duration::ZERO,
         };
-        app.apply_theme(window, cx);
-        if let Err(err) = hotkey_os::replace(&mut app.hotkey, &app.config.settings.global_hotkey) {
-            app.status = format!("Global hotkey off: {err}");
-        }
         app.wire_inputs(window, cx);
         app.poll_task = Some(app.spawn_poll(cx));
-        if app.projects.is_empty() {
-            app.status = "Add a folder to start. Ctrl+O".into();
-        } else {
-            app.select_project(0, false, window, cx);
-        }
-        if let Some(raw) = launch.as_deref().filter(|raw| raw.starts_with("envy:")) {
-            match Deeplink::parse(raw) {
-                Ok(link) => app.follow_link(link, window, cx),
-                Err(err) => app.status = err.to_string(),
-            }
-        }
+        app.spawn_boot(cx);
         let focus = app.focus.clone();
         cx.defer_in(window, move |this, window, cx| {
             window.focus(&this.focus, cx);
             let _ = focus;
         });
         app
+    }
+
+    /// Read config after the first frame, then scan. Neither blocks painting.
+    fn spawn_boot(&mut self, cx: &mut Context<Self>) {
+        let ui_ready = crate::STARTED
+            .get()
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        cx.spawn(async move |this, async_cx| {
+            let loaded = async_cx
+                .background_executor()
+                .spawn(async move {
+                    let began = Instant::now();
+                    let config = Config::load();
+                    (config, began.elapsed())
+                })
+                .await;
+            let _ = this.update(async_cx, |view, cx| {
+                view.finish_boot(loaded.0, ui_ready, loaded.1, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn finish_boot(
+        &mut self,
+        config: Config,
+        ui_ready: Duration,
+        config_load: Duration,
+        cx: &mut Context<Self>,
+    ) {
+        self.config = config;
+        self.booting = false;
+        let hotkey = self.config.settings.global_hotkey.clone();
+        self.window
+            .update(cx, |_, window, cx| {
+                let hotkey = hotkey.clone();
+                self.hotkey_input.update(cx, |input, cx| {
+                    input.set_value(hotkey, window, cx);
+                });
+                self.apply_theme(window, cx);
+            })
+            .ok();
+        self.install_hotkey(hotkey, false, cx);
+        self.config_load = config_load;
+        let _ = ui_ready;
+        if self.config.folders.is_empty() {
+            self.log_startup(None, None);
+            self.status = "Add a folder to start. Ctrl+O".into();
+            cx.notify();
+            return;
+        }
+        self.begin_scan(false, cx);
     }
 
     pub fn window_options(bounds_cx: &mut App) -> WindowOptions {
@@ -219,10 +312,10 @@ impl EnvyApp {
         self.input_subs.push(cx.subscribe_in(
             &self.folder_input,
             window,
-            |this, state, event, window, cx| {
+            |this, state, event, _window, cx| {
                 if let InputEvent::PressEnter { .. } = event {
                     let path = state.read(cx).value().to_string();
-                    this.commit_folder(path, window, cx);
+                    this.commit_folder(path, cx);
                 }
             },
         ));
@@ -248,32 +341,13 @@ impl EnvyApp {
                 self.on_second_launch(message, cx);
             }
         }
-        let changed = self
-            .open
-            .as_mut()
-            .and_then(|open| open.poll_disk().ok())
-            .unwrap_or(false);
-        if changed {
-            self.status = "Changed on disk. R reloads, Esc keeps yours.".into();
-            cx.notify();
+        self.schedule_disk_check(cx);
+        if !self.booting && self.last_scan.elapsed() >= RESCAN_AFTER {
+            self.begin_scan(true, cx);
         }
-        if self.last_scan.elapsed() >= RESCAN_AFTER {
-            self.start_scan();
-        }
-        let finished = match self.scan_rx.as_ref().map(|rx| rx.try_recv()) {
-            Some(Ok(message)) => Some(message),
-            Some(Err(TryRecvError::Empty)) | None => None,
-            Some(Err(TryRecvError::Disconnected)) => {
-                self.scan_rx = None;
-                None
-            }
-        };
-        if let Some((projects, errors)) = finished {
-            self.scan_rx = None;
-            if !projects.is_empty() || errors.is_empty() {
-                self.apply_projects(projects, errors);
-            }
-            cx.notify();
+        if self.diff_stale {
+            self.diff_stale = false;
+            self.recompute_diff(cx);
         }
         if self.config.settings.theme == ThemeSetting::System {
             Theme::sync_system_appearance(None, cx);
@@ -311,18 +385,83 @@ impl EnvyApp {
         }
     }
 
-    fn start_scan(&mut self) {
-        if self.scan_rx.is_some() || self.config.folders.is_empty() {
+    fn begin_scan(&mut self, quiet: bool, cx: &mut Context<Self>) {
+        if self.config.folders.is_empty() {
+            self.scanning = false;
+            self.projects.clear();
+            self.scan_errors.clear();
             return;
         }
         self.last_scan = Instant::now();
-        let (tx, rx) = mpsc::channel();
+        self.scan_epoch = self.scan_epoch.wrapping_add(1);
+        let epoch = self.scan_epoch;
+        self.scanning = true;
+        if !quiet {
+            self.status = "Scanning folders…".into();
+        }
         let folders = self.config.folders.clone();
         let config = self.config.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(envy_core::discover(&folders, &config));
-        });
-        self.scan_rx = Some(rx);
+        cx.notify();
+        cx.spawn(async move |this, async_cx| {
+            let started = Instant::now();
+            let scanned = async_cx
+                .background_executor()
+                .spawn(async move { discover_files(&folders, &config) })
+                .await;
+            let files_took = started.elapsed();
+            let config = {
+                let config = this.update(async_cx, |view, cx| {
+                    if view.scan_epoch != epoch {
+                        return None;
+                    }
+                    let (projects, errors) = scanned;
+                    view.apply_projects(projects, errors);
+                    view.scanning = true;
+                    if !quiet {
+                        view.status = "Reading git repos…".into();
+                    }
+                    view.ensure_open(cx);
+                    view.open_pending_file(cx);
+                    cx.notify();
+                    Some(view.config.clone())
+                });
+                match config {
+                    Ok(Some(config)) => config,
+                    _ => return,
+                }
+            };
+            let mut projects = this
+                .update(async_cx, |view, _cx| view.projects.clone())
+                .unwrap_or_default();
+            let git_started = Instant::now();
+            let named = async_cx
+                .background_executor()
+                .spawn(async move {
+                    attach_git_identity(&mut projects, &config);
+                    projects
+                })
+                .await;
+            let git_took = git_started.elapsed();
+            let _ = this.update(async_cx, |view, cx| {
+                if view.scan_epoch != epoch {
+                    return;
+                }
+                let errors = view.scan_errors.clone();
+                view.apply_projects(named, errors);
+                view.scanning = false;
+                view.ensure_open(cx);
+                view.open_pending_file(cx);
+                view.follow_pending_launch(cx);
+                if !quiet && view.status.starts_with("Reading git") {
+                    view.status.clear();
+                }
+                if !quiet {
+                    view.log_startup(Some(files_took), Some(git_took));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn apply_projects(&mut self, projects: Vec<Project>, errors: Vec<ScanError>) {
@@ -420,9 +559,28 @@ impl EnvyApp {
         if focus_keys {
             self.zone = Zone::Keys;
         }
-        self.load_selected_file();
+        self.load_selected_file(cx);
         self.focus_self(window, cx);
         cx.notify();
+    }
+
+    fn ensure_open(&mut self, cx: &mut Context<Self>) {
+        if self.open.is_some()
+            || self.io_running
+            || self
+                .io_queue
+                .iter()
+                .any(|job| matches!(job, IoJob::Load { .. }))
+        {
+            return;
+        }
+        let Some(index) = self.project_ix else {
+            return;
+        };
+        if self.file_ix.is_none() {
+            self.file_ix = default_file_index(&self.projects[index]);
+        }
+        self.load_selected_file(cx);
     }
 
     fn select_file(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -434,12 +592,12 @@ impl EnvyApp {
         }
         self.file_ix = Some(index);
         self.zone = Zone::Keys;
-        self.load_selected_file();
+        self.load_selected_file(cx);
         self.focus_self(window, cx);
         cx.notify();
     }
 
-    fn load_selected_file(&mut self) {
+    fn load_selected_file(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.current_path() else {
             self.open = None;
             return;
@@ -447,26 +605,174 @@ impl EnvyApp {
         if self.open.as_ref().is_some_and(|open| open.path == path) {
             return;
         }
-        if let Some(open) = self.open.as_mut() {
-            if let Err(err) = open.save() {
-                self.status = format!("Save failed: {err}");
-                return;
+        if let Some(open) = self.open.as_ref() {
+            if open.is_dirty() {
+                self.enqueue_save(cx);
             }
         }
-        match OpenFile::load(&path) {
-            Ok(open) => {
-                self.open = Some(open);
-                self.cursor = 0;
-                self.revealed.clear();
-                self.close_editor();
-                self.choose_diff_target();
-                self.load_diff();
-            }
-            Err(err) => {
-                self.open = None;
-                self.status = format!("Could not open file: {err}");
-            }
+        self.io_epoch = self.io_epoch.wrapping_add(1);
+        let epoch = self.io_epoch;
+        self.status = "Opening…".into();
+        self.io_queue.push_back(IoJob::Load { epoch, path });
+        self.pump_io(cx);
+    }
+
+    fn enqueue_save(&mut self, cx: &mut Context<Self>) {
+        let Some(open) = &self.open else {
+            return;
+        };
+        if !open.is_dirty() {
+            return;
         }
+        self.save_seq = self.save_seq.wrapping_add(1);
+        self.io_queue.push_back(IoJob::Save {
+            seq: self.save_seq,
+            epoch: self.io_epoch,
+            path: open.path.clone(),
+            text: open.document.serialize(),
+        });
+        self.status = "Saving…".into();
+        self.pump_io(cx);
+    }
+
+    fn pump_io(&mut self, cx: &mut Context<Self>) {
+        if self.io_running {
+            return;
+        }
+        let Some(job) = self.io_queue.pop_front() else {
+            return;
+        };
+        self.io_running = true;
+        cx.notify();
+        cx.spawn(async move |this, async_cx| {
+            let done = async_cx
+                .background_executor()
+                .spawn(async move { run_io(job) })
+                .await;
+            let _ = this.update(async_cx, |view, cx| {
+                view.io_running = false;
+                view.apply_io(done, cx);
+                view.pump_io(cx);
+            });
+        })
+        .detach();
+    }
+
+    fn apply_io(&mut self, done: IoDone, cx: &mut Context<Self>) {
+        match done {
+            IoDone::Saved {
+                seq,
+                epoch,
+                path,
+                text,
+                result,
+            } => match result {
+                Ok(mtime) => {
+                    if self.save_seq == seq && self.io_epoch == epoch {
+                        if let Some(open) = self.open.as_mut() {
+                            if open.path == path {
+                                open.note_saved(text, mtime);
+                            }
+                        }
+                        if self.status == "Saving…" {
+                            self.status = "Saved.".into();
+                        }
+                    }
+                }
+                Err(err) => {
+                    self.status = format!("Save failed: {err}");
+                    self.io_queue.retain(|job| !matches!(job, IoJob::Quit));
+                }
+            },
+            IoDone::Loaded {
+                epoch,
+                path,
+                result,
+            } => {
+                if self.io_epoch != epoch {
+                    return;
+                }
+                match result {
+                    Ok(open) => {
+                        self.open = Some(open);
+                        self.cursor = 0;
+                        self.revealed.clear();
+                        self.close_editor();
+                        self.choose_diff_target();
+                        self.load_diff(cx);
+                        if let Some(key) = self.pending_key.take() {
+                            self.jump_to_key(&key);
+                            self.status = format!("Jumped to {key}");
+                        } else if self.status == "Opening…" || self.status == "Saving…" {
+                            self.status.clear();
+                        }
+                        let _ = path;
+                    }
+                    Err(err) => {
+                        self.open = None;
+                        self.status = format!("Could not open file: {err}");
+                    }
+                }
+            }
+            IoDone::Reloaded { epoch, result } => {
+                if self.io_epoch != epoch {
+                    return;
+                }
+                match result {
+                    Ok(fresh) => {
+                        if let Some(open) = self.open.as_mut() {
+                            open.replace_from_disk(fresh);
+                        }
+                        self.cursor = 0;
+                        self.sync_keys();
+                        self.diff_stale = true;
+                        self.status = "Reloaded from disk.".into();
+                    }
+                    Err(err) => self.status = format!("Reload failed: {err}"),
+                }
+            }
+            IoDone::Quit => cx.quit(),
+        }
+        cx.notify();
+    }
+
+    fn schedule_disk_check(&mut self, cx: &mut Context<Self>) {
+        if self.disk_check || self.last_disk.elapsed() < Duration::from_millis(300) {
+            return;
+        }
+        let Some(open) = &self.open else {
+            return;
+        };
+        self.last_disk = Instant::now();
+        self.disk_check = true;
+        let (path, known, ignored, document) = open.disk_parts();
+        let epoch = self.io_epoch;
+        cx.spawn(async move |this, async_cx| {
+            let notice = async_cx
+                .background_executor()
+                .spawn(async move {
+                    envy_core::inspect_disk(&path, known, ignored, &document.serialize())
+                })
+                .await;
+            let _ = this.update(async_cx, |view, cx| {
+                view.disk_check = false;
+                if view.io_epoch != epoch {
+                    return;
+                }
+                let Ok(notice) = notice else {
+                    return;
+                };
+                let tell = view
+                    .open
+                    .as_mut()
+                    .is_some_and(|open| open.apply_disk_notice(notice));
+                if tell {
+                    view.status = "Changed on disk. R reloads, Esc keeps yours.".into();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn choose_diff_target(&mut self) {
@@ -491,15 +797,72 @@ impl EnvyApp {
             });
     }
 
-    fn load_diff(&mut self) {
+    fn load_diff(&mut self, cx: &mut Context<Self>) {
+        self.diff_epoch = self.diff_epoch.wrapping_add(1);
+        let epoch = self.diff_epoch;
+        self.diff_report = None;
         let Some(path) = self.diff_path() else {
             self.diff_doc = None;
             return;
         };
-        self.diff_doc = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| String::from_utf8(bytes).ok())
-            .map(|text| EnvDocument::parse(&text));
+        let left = self.open.as_ref().map(|open| open.document.clone());
+        cx.spawn(async move |this, async_cx| {
+            let loaded = async_cx
+                .background_executor()
+                .spawn(async move {
+                    let text = std::fs::read_to_string(&path).ok()?;
+                    let right = EnvDocument::parse(&text);
+                    let report = left.as_ref().map(|left| diff::diff(left, &right));
+                    Some((right, report))
+                })
+                .await;
+            let _ = this.update(async_cx, |view, cx| {
+                if view.diff_epoch != epoch {
+                    return;
+                }
+                match loaded {
+                    Some((right, report)) => {
+                        view.diff_doc = Some(right);
+                        view.diff_report = report;
+                    }
+                    None => {
+                        view.diff_doc = None;
+                        view.diff_report = None;
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn recompute_diff(&mut self, cx: &mut Context<Self>) {
+        if !self.diff_open {
+            return;
+        }
+        let Some(left) = self.open.as_ref().map(|open| open.document.clone()) else {
+            return;
+        };
+        let Some(right) = self.diff_doc.clone() else {
+            self.load_diff(cx);
+            return;
+        };
+        self.diff_epoch = self.diff_epoch.wrapping_add(1);
+        let epoch = self.diff_epoch;
+        cx.spawn(async move |this, async_cx| {
+            let report = async_cx
+                .background_executor()
+                .spawn(async move { diff::diff(&left, &right) })
+                .await;
+            let _ = this.update(async_cx, |view, cx| {
+                if view.diff_epoch != epoch {
+                    return;
+                }
+                view.diff_report = Some(report);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn diff_path(&self) -> Option<PathBuf> {
@@ -522,27 +885,30 @@ impl EnvyApp {
         cx.notify();
     }
 
-    pub fn save_if_dirty(&mut self) {
+    /// Save if needed, then quit. Returns false while a save is still running
+    /// so the window stays up until the write finishes.
+    pub fn close_requested(&mut self, cx: &mut Context<Self>) -> bool {
         if self.open.as_ref().is_some_and(|open| open.is_dirty()) {
-            self.save_open();
+            self.enqueue_save(cx);
+            self.io_queue.push_back(IoJob::Quit);
+            self.pump_io(cx);
+            false
+        } else {
+            cx.quit();
+            true
         }
     }
 
-    fn save_open(&mut self) {
-        let saved = match self.open.as_mut() {
-            Some(open) => open.save(),
-            None => return,
-        };
-        match saved {
-            Ok(()) => {
-                self.sync_keys();
-                self.status = "Saved.".into();
-            }
-            Err(err) => self.status = format!("Save failed: {err}"),
-        }
+    fn save_open(&mut self, cx: &mut Context<Self>) {
+        self.enqueue_save(cx);
+        cx.notify();
     }
 
     fn mark_edited(&mut self) {
+        self.io_epoch = self.io_epoch.wrapping_add(1);
+        self.io_queue
+            .retain(|job| !matches!(job, IoJob::Load { .. }));
+        self.diff_stale = true;
         self.sync_keys();
         self.status = "Edited. Ctrl+S saves.".into();
     }
@@ -562,18 +928,12 @@ impl EnvyApp {
         recompute_missing(project);
     }
 
-    fn follow_link(&mut self, link: Deeplink, window: &mut Window, cx: &mut Context<Self>) {
-        self.follow_link_inner(&link);
-        self.focus_self(window, cx);
-        cx.notify();
-    }
-
     fn follow_link_cx(&mut self, link: Deeplink, cx: &mut Context<Self>) {
-        self.follow_link_inner(&link);
+        self.follow_link_inner(&link, cx);
         cx.notify();
     }
 
-    fn follow_link_inner(&mut self, link: &Deeplink) {
+    fn follow_link_inner(&mut self, link: &Deeplink, cx: &mut Context<Self>) {
         let Some(project_ix) = resolve_project(&self.projects, &self.config, &link.repo) else {
             self.status = format!("No project named {}", link.repo);
             return;
@@ -591,11 +951,8 @@ impl EnvyApp {
             self.file_ix = default_file_index(&self.projects[project_ix]);
         }
         self.zone = Zone::Keys;
-        self.load_selected_file();
-        if let Some(key) = &link.key {
-            self.jump_to_key(key);
-            self.status = format!("Jumped to {key}");
-        }
+        self.pending_key = link.key.clone();
+        self.load_selected_file(cx);
     }
 
     fn jump_to_key(&mut self, key: &str) {
@@ -1115,20 +1472,18 @@ impl EnvyApp {
     }
 
     fn reload_external(&mut self, cx: &mut Context<Self>) {
-        let Some(open) = self.open.as_mut() else {
+        let Some(open) = &self.open else {
             return;
         };
         if !open.external_change {
             return;
         }
-        if let Err(err) = open.reload() {
-            self.status = format!("Reload failed: {err}");
-        } else {
-            self.cursor = 0;
-            self.sync_keys();
-            self.status = "Reloaded from disk.".into();
-        }
-        cx.notify();
+        self.io_epoch = self.io_epoch.wrapping_add(1);
+        let epoch = self.io_epoch;
+        let path = open.path.clone();
+        self.status = "Reloading…".into();
+        self.io_queue.push_back(IoJob::Reload { epoch, path });
+        self.pump_io(cx);
     }
 
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1191,11 +1546,8 @@ impl EnvyApp {
                     self.project_ix = Some(project);
                     if let Some(file) = hit.file {
                         self.file_ix = Some(file);
-                        self.load_selected_file();
-                    }
-                    if let Some(key) = &hit.key {
-                        self.jump_to_key(key);
-                        self.status = format!("Jumped to {key}");
+                        self.pending_key = hit.key.clone();
+                        self.load_selected_file(cx);
                     }
                     self.zone = Zone::Keys;
                     self.focus_self(window, cx);
@@ -1224,47 +1576,104 @@ impl EnvyApp {
             }
             "settings" => self.open_settings(window, cx),
             "refresh" => {
-                self.last_scan = Instant::now() - RESCAN_AFTER;
-                self.start_scan();
-                self.status = "Scanning.".into();
+                self.begin_scan(false, cx);
+                self.status = "Scanning folders…".into();
                 cx.notify();
             }
             "copy" => self.copy_selected(cx),
-            "quit" => cx.quit(),
+            "quit" => {
+                self.close_requested(cx);
+            }
             _ => {}
         }
     }
 
-    fn open_add_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.overlay = Overlay::AddFolder;
-        self.folder_input.update(cx, |input, cx| {
-            input.set_value("", window, cx);
+    fn open_add_folder(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Add folder".into()),
         });
-        let handle = self.folder_input.focus_handle(cx);
-        window.focus(&handle, cx);
+        self.status = "Choose a folder.".into();
+        cx.notify();
+        cx.spawn(async move |this, async_cx| {
+            let picked = receiver.await;
+            let _ = this.update(async_cx, |view, cx| match picked {
+                Ok(Ok(Some(paths))) => {
+                    if let Some(path) = paths.into_iter().next() {
+                        view.commit_folder(path.display().to_string(), cx);
+                    }
+                }
+                Ok(Ok(None)) => {
+                    view.status = "Add folder cancelled.".into();
+                    cx.notify();
+                }
+                Ok(Err(err)) => {
+                    view.status = format!("Folder dialog unavailable ({err}). Type a path.");
+                    view.show_path_panel(cx);
+                }
+                Err(_) => {}
+            });
+        })
+        .detach();
+    }
+
+    fn show_path_panel(&mut self, cx: &mut Context<Self>) {
+        self.overlay = Overlay::AddFolder;
+        self.window
+            .update(cx, |_, window, cx| {
+                self.folder_input.update(cx, |input, cx| {
+                    input.set_value("", window, cx);
+                });
+                let handle = self.folder_input.focus_handle(cx);
+                window.focus(&handle, cx);
+            })
+            .ok();
         cx.notify();
     }
 
-    fn commit_folder(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn commit_folder(&mut self, path: String, cx: &mut Context<Self>) {
         let path = PathBuf::from(path.trim());
-        if path.as_os_str().is_empty() || !path.is_dir() {
+        if path.as_os_str().is_empty() {
             self.status = "That folder does not exist.".into();
             cx.notify();
             return;
         }
-        self.config.add_folder(path);
-        if let Err(err) = self.config.save() {
-            self.status = format!("Could not save settings: {err}");
-        }
-        let (projects, errors) = envy_core::discover(&self.config.folders, &self.config);
-        self.apply_projects(projects, errors);
         self.overlay = Overlay::None;
-        if self.project_ix.is_none() && !self.projects.is_empty() {
-            self.select_project(0, true, window, cx);
-        }
-        self.status = "Folder added.".into();
-        self.focus_self(window, cx);
+        self.scanning = true;
+        self.status = "Adding folder…".into();
+        self.focus_self_cx(cx);
+        let mut config = self.config.clone();
         cx.notify();
+        cx.spawn(async move |this, async_cx| {
+            let prepared = async_cx
+                .background_executor()
+                .spawn(async move {
+                    if !path.is_dir() {
+                        return Err("That folder does not exist.".to_string());
+                    }
+                    config.add_folder(path);
+                    config
+                        .save()
+                        .map_err(|err| format!("Could not save settings: {err}"))?;
+                    Ok(config)
+                })
+                .await;
+            let _ = this.update(async_cx, |view, cx| match prepared {
+                Ok(config) => {
+                    view.config = config;
+                    view.status = "Folder added.".into();
+                    view.begin_scan(false, cx);
+                }
+                Err(err) => {
+                    view.scanning = false;
+                    view.status = err;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn remove_folder(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -1273,10 +1682,9 @@ impl EnvyApp {
         }
         let folder = self.config.folders[index].clone();
         self.config.remove_folder(&folder);
-        let _ = self.config.save();
-        let (projects, errors) = envy_core::discover(&self.config.folders, &self.config);
-        self.apply_projects(projects, errors);
+        self.persist_config(cx);
         self.status = "Folder removed.".into();
+        self.begin_scan(false, cx);
         cx.notify();
     }
 
@@ -1291,14 +1699,14 @@ impl EnvyApp {
 
     fn set_theme(&mut self, theme: ThemeSetting, window: &mut Window, cx: &mut Context<Self>) {
         self.config.settings.theme = theme;
-        let _ = self.config.save();
+        self.persist_config(cx);
         self.apply_theme(window, cx);
         cx.notify();
     }
 
     fn toggle_clear_clipboard(&mut self, cx: &mut Context<Self>) {
         self.config.settings.clear_clipboard = !self.config.settings.clear_clipboard;
-        let _ = self.config.save();
+        self.persist_config(cx);
         self.status = if self.config.settings.clear_clipboard {
             "Clipboard clears 30s after a copy.".into()
         } else {
@@ -1309,16 +1717,8 @@ impl EnvyApp {
 
     fn commit_hotkey(&mut self, spec: String, window: &mut Window, cx: &mut Context<Self>) {
         let spec = spec.trim().to_string();
-        if let Err(err) = hotkey_os::replace(&mut self.hotkey, &spec) {
-            self.status = format!("Hotkey not changed: {err}");
-            cx.notify();
-            return;
-        }
-        self.config.settings.global_hotkey = spec;
-        let _ = self.config.save();
-        self.status = format!("Hotkey is {}.", self.config.settings.global_hotkey);
         self.focus_self(window, cx);
-        cx.notify();
+        self.install_hotkey(spec, true, cx);
     }
 
     fn toggle_diff(&mut self, cx: &mut Context<Self>) {
@@ -1327,7 +1727,7 @@ impl EnvyApp {
             if self.diff_ix.is_none() {
                 self.choose_diff_target();
             }
-            self.load_diff();
+            self.load_diff(cx);
         }
         cx.notify();
     }
@@ -1349,7 +1749,7 @@ impl EnvyApp {
         }
         self.diff_ix = Some(next);
         self.diff_open = true;
-        self.load_diff();
+        self.load_diff(cx);
         cx.notify();
     }
 
@@ -1368,44 +1768,42 @@ impl EnvyApp {
             cx.notify();
             return;
         };
+        let example_path = example.path.clone();
         let dest = example
             .path
             .parent()
             .unwrap_or(project.root.as_path())
             .join(".env.local");
-        if dest.exists() {
-            self.status = ".env.local already exists.".into();
-            cx.notify();
-            return;
-        }
-        let loaded = match OpenFile::load(&example.path) {
-            Ok(open) => open,
-            Err(err) => {
-                self.status = format!("Could not read example: {err}");
-                cx.notify();
-                return;
-            }
-        };
-        let document = from_example(&loaded.document);
-        match OpenFile::create(&dest, document) {
-            Ok(_) => {
-                let (projects, errors) = envy_core::discover(&self.config.folders, &self.config);
-                self.apply_projects(projects, errors);
-                if let Some(project_ix) = self.project_ix {
-                    if let Some(file_ix) = self
-                        .projects
-                        .get(project_ix)
-                        .and_then(|project| project.files.iter().position(|file| file.path == dest))
-                    {
-                        self.file_ix = Some(file_ix);
-                        self.load_selected_file();
-                    }
-                }
-                self.status = "Created .env.local from the example.".into();
-            }
-            Err(err) => self.status = format!("Could not create file: {err}"),
-        }
+        self.status = "Creating .env.local…".into();
         cx.notify();
+        cx.spawn(async move |this, async_cx| {
+            let created = async_cx
+                .background_executor()
+                .spawn(async move {
+                    if dest.exists() {
+                        return Err(".env.local already exists.".to_string());
+                    }
+                    let loaded = OpenFile::load(&example_path)
+                        .map_err(|err| format!("Could not read example: {err}"))?;
+                    let document = from_example(&loaded.document);
+                    OpenFile::create(&dest, document)
+                        .map_err(|err| format!("Could not create file: {err}"))?;
+                    Ok(dest)
+                })
+                .await;
+            let _ = this.update(async_cx, |view, cx| {
+                match created {
+                    Ok(dest) => {
+                        view.pending_file = Some(dest);
+                        view.status = "Created .env.local from the example.".into();
+                        view.begin_scan(false, cx);
+                    }
+                    Err(err) => view.status = err,
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn paste_from_clipboard(&mut self, cx: &mut Context<Self>) {
@@ -1654,7 +2052,15 @@ impl Render for EnvyApp {
                         }),
                     ),
             );
-        if project_rows.is_empty() {
+        if self.booting || self.scanning {
+            sidebar = sidebar.child(div().px_3().py_2().text_sm().text_color(theme_muted).child(
+                if self.booting {
+                    "Starting…"
+                } else {
+                    "Scanning…"
+                },
+            ));
+        } else if project_rows.is_empty() {
             sidebar = sidebar.child(
                 div()
                     .px_3()
@@ -2019,7 +2425,22 @@ impl Render for EnvyApp {
                     .child(div().child(hints)),
             );
 
-        if self.projects.is_empty() {
+        if self.booting || (self.scanning && self.projects.is_empty()) {
+            center = v_flex()
+                .flex_1()
+                .h_full()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .bg(theme_bg)
+                .text_color(theme_muted)
+                .child(if self.booting {
+                    "Starting…"
+                } else {
+                    "Looking for .env files…"
+                })
+                .child(div().text_xs().child("The window stays responsive."));
+        } else if self.projects.is_empty() {
             let entity = cx.entity();
             center = v_flex()
                 .flex_1()
@@ -2103,7 +2524,7 @@ impl Render for EnvyApp {
             .on_action(cx.listener(|this, _: &UndoChange, _, cx| this.undo(cx)))
             .on_action(cx.listener(|this, _: &RedoChange, _, cx| this.redo(cx)))
             .on_action(cx.listener(|this, _: &Save, _, cx| {
-                this.save_open();
+                this.save_open(cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ShowShortcuts, window, cx| {
@@ -2116,7 +2537,7 @@ impl Render for EnvyApp {
             )
             .on_action(cx.listener(|this, _: &Refresh, _, cx| {
                 this.last_scan = Instant::now() - RESCAN_AFTER;
-                this.start_scan();
+                this.begin_scan(false, cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleDiff, _, cx| this.toggle_diff(cx)))
@@ -2191,13 +2612,13 @@ impl EnvyApp {
                     .border_color(border)
                     .child(format!("Compared with {name}")),
             );
-        let Some(current) = self.open.as_ref().map(|open| &open.document) else {
-            return panel.child(div().p_3().text_color(muted).child("No file open."));
+        let Some(report) = &self.diff_report else {
+            return panel.child(div().p_3().text_color(muted).child(if self.open.is_none() {
+                "No file open."
+            } else {
+                "Comparing…"
+            }));
         };
-        let Some(other) = &self.diff_doc else {
-            return panel.child(div().p_3().text_color(muted).child("Nothing to compare."));
-        };
-        let report = diff::diff(current, other);
         let missing = report.missing_on_left().count();
         let entity = cx.entity();
         panel = panel.child(
@@ -2303,7 +2724,7 @@ impl EnvyApp {
                     .tooltip_with_action("Save", &Save, Some("Envy"))
                     .on_click(move |_, _, cx| {
                         save.update(cx, |this, cx| {
-                            this.save_open();
+                            this.save_open(cx);
                             cx.notify();
                         });
                     }),
@@ -2553,8 +2974,8 @@ impl EnvyApp {
     }
 
     fn folder_panel(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
-        #[cfg_attr(not(windows), allow(unused_mut))]
-        let mut panel = v_flex()
+        let entity = cx.entity();
+        v_flex()
             .p_4()
             .gap_2()
             .bg(cx.theme().background)
@@ -2572,26 +2993,14 @@ impl EnvyApp {
                     .text_color(cx.theme().muted_foreground)
                     .child("Path to a directory. Envy looks for .env files inside it."),
             )
-            .child(Input::new(&self.folder_input));
-        #[cfg(windows)]
-        {
-            let entity = cx.entity();
-            panel = panel.child(
+            .child(Input::new(&self.folder_input))
+            .child(
                 icon_button("browse-folder", IconName::Folder, "Browse").on_click(
                     move |_, window, cx| {
-                        if let Some(path) =
-                            rfd::FileDialog::new().set_title("Add folder").pick_folder()
-                        {
-                            entity.update(cx, |this, cx| {
-                                this.commit_folder(path.display().to_string(), window, cx);
-                            });
-                        }
+                        entity.update(cx, |this, cx| this.open_add_folder(window, cx));
                     },
                 ),
-            );
-        }
-        let _ = cx;
-        panel
+            )
     }
 
     fn paste_panel(&self, plan: &PastePlan, cx: &App) -> gpui_kit::Div {
@@ -2639,23 +3048,17 @@ impl EnvyApp {
     }
 
     fn add_missing_keys(&mut self, cx: &mut Context<Self>) {
-        let Some(other) = self.diff_doc.clone() else {
+        let Some(report) = self.diff_report.clone() else {
             self.status = "Nothing to compare.".into();
             cx.notify();
             return;
         };
-        let missing: Vec<(String, String)> = self
-            .open
-            .as_ref()
-            .map(|open| {
-                diff::diff(&open.document, &other)
-                    .rows
-                    .into_iter()
-                    .filter(|row| row.kind == diff::DiffKind::OnlyRight)
-                    .map(|row| (row.key, row.right.unwrap_or_default()))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let missing: Vec<(String, String)> = report
+            .rows
+            .into_iter()
+            .filter(|row| row.kind == diff::DiffKind::OnlyRight)
+            .map(|row| (row.key, row.right.unwrap_or_default()))
+            .collect();
         if missing.is_empty() {
             self.status = "This file is not missing any keys.".into();
             cx.notify();
@@ -2754,6 +3157,180 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+,", "Settings"),
     ("?", "This list"),
 ];
+
+enum IoDone {
+    Saved {
+        seq: u64,
+        epoch: u64,
+        path: PathBuf,
+        text: String,
+        result: std::io::Result<Option<std::time::SystemTime>>,
+    },
+    Loaded {
+        epoch: u64,
+        path: PathBuf,
+        result: std::io::Result<OpenFile>,
+    },
+    Reloaded {
+        epoch: u64,
+        result: std::io::Result<OpenFile>,
+    },
+    Quit,
+}
+
+fn run_io(job: IoJob) -> IoDone {
+    match job {
+        IoJob::Save {
+            seq,
+            epoch,
+            path,
+            text,
+        } => {
+            let result = save_text(&path, &text);
+            IoDone::Saved {
+                seq,
+                epoch,
+                path,
+                text,
+                result,
+            }
+        }
+        IoJob::Load { epoch, path } => {
+            let result = OpenFile::load(&path);
+            IoDone::Loaded {
+                epoch,
+                path,
+                result,
+            }
+        }
+        IoJob::Reload { epoch, path } => {
+            let result = OpenFile::load(&path);
+            IoDone::Reloaded { epoch, result }
+        }
+        IoJob::Quit => IoDone::Quit,
+    }
+}
+
+impl EnvyApp {
+    fn focus_self_cx(&self, cx: &mut App) {
+        let focus = self.focus.clone();
+        self.window
+            .update(cx, |_, window, cx| {
+                window.focus(&focus, cx);
+            })
+            .ok();
+    }
+
+    fn open_pending_file(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.pending_file.clone() else {
+            return;
+        };
+        let Some(project_ix) = self.project_ix else {
+            return;
+        };
+        let Some(file_ix) = self
+            .projects
+            .get(project_ix)
+            .and_then(|project| project.files.iter().position(|file| file.path == path))
+        else {
+            return;
+        };
+        self.pending_file = None;
+        self.file_ix = Some(file_ix);
+        self.load_selected_file(cx);
+    }
+
+    fn follow_pending_launch(&mut self, cx: &mut Context<Self>) {
+        let Some(raw) = self.pending_launch.take() else {
+            return;
+        };
+        if !raw.starts_with("envy:") {
+            return;
+        }
+        match Deeplink::parse(&raw) {
+            Ok(link) => self.follow_link_cx(link, cx),
+            Err(err) => self.status = err.to_string(),
+        }
+    }
+
+    fn persist_config(&mut self, cx: &mut Context<Self>) {
+        self.config_dirty = true;
+        if self.config_saving {
+            return;
+        }
+        self.config_saving = true;
+        let config = self.config.clone();
+        self.config_dirty = false;
+        cx.spawn(async move |this, async_cx| {
+            let result = async_cx
+                .background_executor()
+                .spawn(async move { config.save() })
+                .await;
+            let _ = this.update(async_cx, |view, cx| {
+                view.config_saving = false;
+                if let Err(err) = result {
+                    view.status = format!("Could not save settings: {err}");
+                    cx.notify();
+                }
+                if view.config_dirty {
+                    view.persist_config(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn install_hotkey(&mut self, spec: String, announce: bool, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, async_cx| {
+            let spec_for_result = spec.clone();
+            let result = async_cx
+                .background_executor()
+                .spawn(async move {
+                    hotkey_os::request(spec)
+                        .recv()
+                        .unwrap_or_else(|_| Err("Hotkey thread stopped.".into()))
+                })
+                .await;
+            let _ = this.update(async_cx, |view, cx| match result {
+                Ok(()) => {
+                    view.config.settings.global_hotkey = spec_for_result.clone();
+                    if announce {
+                        view.persist_config(cx);
+                        view.status = format!("Hotkey is {spec_for_result}.");
+                        cx.notify();
+                    }
+                }
+                Err(err) => {
+                    view.status = if announce {
+                        format!("Hotkey not changed: {err}")
+                    } else {
+                        format!("Global hotkey off: {err}")
+                    };
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn log_startup(&mut self, files: Option<Duration>, git: Option<Duration>) {
+        if self.startup_logged {
+            return;
+        }
+        self.startup_logged = true;
+        let line = format!(
+            "ui_ready_ms={} config_ms={} files_ms={} git_ms={}",
+            self.ui_ready.as_millis(),
+            self.config_load.as_millis(),
+            files.unwrap_or_default().as_millis(),
+            git.unwrap_or_default().as_millis(),
+        );
+        std::thread::Builder::new()
+            .name("envy-startup-log".into())
+            .spawn(move || crate::note(&line))
+            .ok();
+    }
+}
 
 fn theme_button(
     id: &'static str,

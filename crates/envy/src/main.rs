@@ -11,20 +11,33 @@ mod instance;
 mod protocol;
 mod view;
 
+use std::time::Instant;
+
 use gpui_kit::{App, AppContext};
 use view::EnvyApp;
 
+/// Process start, before any window work. Used to measure time-to-first-frame.
+pub(crate) static STARTED: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
 fn main() {
+    let _ = STARTED.set(Instant::now());
     let args: Vec<String> = std::env::args().skip(1).collect();
     let payload = args
         .iter()
         .find(|arg| arg.starts_with("envy:"))
         .cloned()
         .unwrap_or_else(|| "activate".into());
+    // The second process connects and exits here, before GPUI starts, so it
+    // never opens a window. The listener itself runs on its own thread.
     let server = instance::claim_or_forward(&payload);
-    if let Err(err) = protocol::register() {
-        note(&format!("URL scheme was not registered: {err}"));
-    }
+    std::thread::Builder::new()
+        .name("envy-protocol".into())
+        .spawn(|| {
+            if let Err(err) = protocol::register() {
+                note(&format!("URL scheme was not registered: {err}"));
+            }
+        })
+        .ok();
 
     let launch = args.into_iter().find(|arg| arg.starts_with("envy:"));
     gpui_kit::application()
@@ -45,11 +58,7 @@ fn main() {
                         .update(cx, |_, window, cx| {
                             let view = view.clone();
                             window.on_window_should_close(cx, move |_, cx| {
-                                view.update(cx, |this, cx| {
-                                    this.save_if_dirty();
-                                    cx.quit();
-                                });
-                                true
+                                view.update(cx, |this, cx| this.close_requested(cx))
                             });
                             window.set_window_title("Envy");
                         })
@@ -60,7 +69,7 @@ fn main() {
         });
 }
 
-fn note(message: &str) {
+pub(crate) fn note(message: &str) {
     let path = envy_core::config_dir().join("startup.log");
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);

@@ -149,37 +149,64 @@ impl OpenFile {
         self.ignored_mtime = self.mtime;
     }
 
+    /// Pieces a background task needs to notice an external edit.
+    pub fn disk_parts(&self) -> (PathBuf, Option<SystemTime>, Option<SystemTime>, EnvDocument) {
+        (
+            self.path.clone(),
+            self.mtime,
+            self.ignored_mtime,
+            self.document.clone(),
+        )
+    }
+
+    /// Remember a save that already landed on disk. Does not touch the disk.
+    pub fn note_saved(&mut self, text: String, mtime: Option<SystemTime>) {
+        self.clean = text;
+        self.mtime = mtime;
+        self.external_change = false;
+        self.ignored_mtime = None;
+    }
+
+    /// Swap in a document that was loaded on a background task.
+    pub fn replace_from_disk(&mut self, fresh: OpenFile) {
+        self.push_undo();
+        self.document = fresh.document;
+        self.clean = fresh.clean;
+        self.mtime = fresh.mtime;
+        self.external_change = false;
+        self.ignored_mtime = None;
+        self.redo.clear();
+    }
+
     /// Returns true when the file on disk changed and is not what we have.
     pub fn poll_disk(&mut self) -> io::Result<bool> {
-        let meta = match fs::metadata(&self.path) {
-            Ok(meta) => meta,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                self.external_change = true;
-                return Ok(true);
-            }
-            Err(err) => return Err(err),
-        };
-        let mtime = meta.modified().ok();
-        if mtime == self.mtime || mtime == self.ignored_mtime {
-            return Ok(false);
-        }
-        let bytes = fs::read(&self.path)?;
-        let text = match String::from_utf8(bytes) {
-            Ok(text) => text,
-            Err(_) => {
-                self.external_change = true;
+        let notice = inspect_disk(
+            &self.path,
+            self.mtime,
+            self.ignored_mtime,
+            &self.document.serialize(),
+        )?;
+        Ok(self.apply_disk_notice(notice))
+    }
+
+    /// Apply a notice produced by [`inspect_disk`] on another thread.
+    /// Returns true when the editor should tell the user.
+    pub fn apply_disk_notice(&mut self, notice: DiskNotice) -> bool {
+        match notice {
+            DiskNotice::Quiet => false,
+            DiskNotice::Adopted(mtime) => {
                 self.mtime = mtime;
-                return Ok(true);
+                self.external_change = false;
+                self.ignored_mtime = None;
+                false
             }
-        };
-        self.mtime = mtime;
-        if text == self.document.serialize() {
-            self.external_change = false;
-            self.ignored_mtime = None;
-            return Ok(false);
+            DiskNotice::External(mtime) => {
+                let tell = !self.external_change;
+                self.mtime = mtime.or(self.mtime);
+                self.external_change = true;
+                tell
+            }
         }
-        self.external_change = true;
-        Ok(true)
     }
 
     fn push_undo(&mut self) {
@@ -238,6 +265,54 @@ fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
     {
         fs::rename(from, to)
     }
+}
+
+/// What [`inspect_disk`] found. Produced off the UI thread and applied later.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DiskNotice {
+    /// The mtime is one we already accounted for.
+    Quiet,
+    /// The bytes match the open document. Keep the new mtime.
+    Adopted(Option<SystemTime>),
+    /// The file differs, or it is gone.
+    External(Option<SystemTime>),
+}
+
+/// Read `path` and compare it with `current` without mutating editor state.
+pub fn inspect_disk(
+    path: &Path,
+    known: Option<SystemTime>,
+    ignored: Option<SystemTime>,
+    current: &str,
+) -> io::Result<DiskNotice> {
+    let meta = match fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Ok(DiskNotice::External(None));
+        }
+        Err(err) => return Err(err),
+    };
+    let mtime = meta.modified().ok();
+    if mtime == known || mtime == ignored {
+        return Ok(DiskNotice::Quiet);
+    }
+    let bytes = fs::read(path)?;
+    let text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(_) => return Ok(DiskNotice::External(mtime)),
+    };
+    if text == current {
+        Ok(DiskNotice::Adopted(mtime))
+    } else {
+        Ok(DiskNotice::External(mtime))
+    }
+}
+
+/// Atomic save of `text`. Returns the mtime after the rename.
+/// Call this from a background task; it syncs a sibling file and renames it.
+pub fn save_text(path: &Path, text: &str) -> io::Result<Option<SystemTime>> {
+    write_atomic(path, text.as_bytes())?;
+    Ok(fs::metadata(path).and_then(|meta| meta.modified()).ok())
 }
 
 /// `MoveFileExW` replaces an existing file. `std::fs::rename` does not, on Windows.

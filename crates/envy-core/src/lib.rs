@@ -26,10 +26,13 @@ pub mod session;
 pub use config::{config_dir, config_path, Config, Settings, ThemeSetting};
 pub use deeplink::Deeplink;
 pub use diff::{DiffKind, DiffReport, DiffRow};
-pub use discover::{discover, EnvFile, Project, ScanError};
+pub use discover::{
+    attach_git_identity, discover, discover_files, is_skipped_dir, EnvFile, Project, ScanError,
+    MAX_SCAN_DEPTH,
+};
 pub use document::{is_env_key, Entry, EnvDocument, Node, QuoteStyle};
 pub use hotkey::{Hotkey, HotkeyError};
 pub use paste::{apply_paste, plan_paste, PasteChange, PastePlan};
 pub use scaffold::from_example;
 pub use search::{search, SearchHit, SearchKind};
-pub use session::OpenFile;
+pub use session::{inspect_disk, save_text, DiskNotice, OpenFile};

@@ -13,6 +13,10 @@ use crate::config::Config;
 use crate::diff::missing_vs_example;
 use crate::document::EnvDocument;
 
+/// How many directory levels under an added folder are walked.
+/// `0` is the folder itself. Deeper directories are left alone.
+pub const MAX_SCAN_DEPTH: usize = 8;
+
 const SKIP_DIRS: &[&str] = &[
     ".git",
     "node_modules",
@@ -32,8 +36,12 @@ const SKIP_DIRS: &[&str] = &[
     ".vscode",
 ];
 
-const MAX_DEPTH: usize = 8;
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
+
+/// Dependency and VCS directories the walk never enters.
+pub fn is_skipped_dir(name: &str) -> bool {
+    SKIP_DIRS.iter().any(|skip| name == *skip)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnvFile {
@@ -68,8 +76,24 @@ struct Found {
     document: EnvDocument,
 }
 
-/// Scan `folders` and group env files by repository.
+/// Scan `folders` and group env files by repository, including git names.
+///
+/// The window should call [`discover_files`] first and [`attach_git_identity`]
+/// afterwards. Both do disk IO and belong on a background task. Git config and
+/// `HEAD` are not read until `attach_git_identity`.
 pub fn discover(folders: &[PathBuf], config: &Config) -> (Vec<Project>, Vec<ScanError>) {
+    let (mut projects, errors) = discover_files(folders, config);
+    attach_git_identity(&mut projects, config);
+    (projects, errors)
+}
+
+/// Walk env files and group them. Project names are the folder names.
+/// Branch is `"…"` until [`attach_git_identity`] runs.
+///
+/// The walk skips [`is_skipped_dir`] directories, does not follow symlinks,
+/// and stops at [`MAX_SCAN_DEPTH`]. It does not read git config or `HEAD`.
+pub fn discover_files(folders: &[PathBuf], config: &Config) -> (Vec<Project>, Vec<ScanError>) {
+    let _ = config;
     let mut found: Vec<Found> = Vec::new();
     let mut errors = Vec::new();
     for folder in folders {
@@ -77,14 +101,15 @@ pub fn discover(folders: &[PathBuf], config: &Config) -> (Vec<Project>, Vec<Scan
     }
 
     let mut groups: BTreeMap<PathBuf, Vec<Found>> = BTreeMap::new();
+    let mut roots = std::collections::HashMap::<PathBuf, PathBuf>::new();
     for file in found {
-        let root = project_root(&file.path);
+        let root = cached_project_root(&file.path, &mut roots);
         groups.entry(root).or_default().push(file);
     }
 
     let mut projects = Vec::new();
     for (root, files) in groups {
-        projects.push(build_project(root, files, config));
+        projects.push(build_project(root, files));
     }
     projects.sort_by(|a, b| {
         a.name
@@ -93,6 +118,15 @@ pub fn discover(folders: &[PathBuf], config: &Config) -> (Vec<Project>, Vec<Scan
             .then(a.root.cmp(&b.root))
     });
     (projects, errors)
+}
+
+/// Fill `name` and `branch` from git config and `HEAD`. Disk IO.
+pub fn attach_git_identity(projects: &mut [Project], config: &Config) {
+    for project in projects {
+        let (name, branch) = identity(&project.root, config);
+        project.name = name;
+        project.branch = branch;
+    }
 }
 
 pub fn is_prod_filename(name: &str) -> bool {
@@ -163,7 +197,7 @@ pub fn resolve_file(project: &Project, file: &str) -> Option<usize> {
 }
 
 fn walk(dir: &Path, depth: usize, found: &mut Vec<Found>, errors: &mut Vec<ScanError>) {
-    if depth > MAX_DEPTH {
+    if depth > MAX_SCAN_DEPTH {
         return;
     }
     let entries = match fs::read_dir(dir) {
@@ -195,7 +229,7 @@ fn walk(dir: &Path, depth: usize, found: &mut Vec<Found>, errors: &mut Vec<ScanE
             continue;
         }
         if meta.is_dir() {
-            if SKIP_DIRS.iter().any(|skip| name == *skip) {
+            if is_skipped_dir(&name) {
                 continue;
             }
             walk(&path, depth + 1, found, errors);
@@ -236,7 +270,7 @@ fn walk(dir: &Path, depth: usize, found: &mut Vec<Found>, errors: &mut Vec<ScanE
     }
 }
 
-fn build_project(root: PathBuf, files: Vec<Found>, config: &Config) -> Project {
+fn build_project(root: PathBuf, files: Vec<Found>) -> Project {
     let example_indexes: Vec<usize> = files
         .iter()
         .enumerate()
@@ -271,14 +305,30 @@ fn build_project(root: PathBuf, files: Vec<Found>, config: &Config) -> Project {
             .then(a.name.cmp(&b.name))
     });
     let missing_vs_example = env_files.iter().any(|file| file.missing_vs_example);
-    let (name, branch) = identity(&root, config);
+    let name = root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".into());
     Project {
         root,
         name,
-        branch,
+        branch: "…".into(),
         files: env_files,
         missing_vs_example,
     }
+}
+
+fn cached_project_root(
+    file: &Path,
+    cache: &mut std::collections::HashMap<PathBuf, PathBuf>,
+) -> PathBuf {
+    let start = file.parent().unwrap_or(file).to_path_buf();
+    if let Some(root) = cache.get(&start) {
+        return root.clone();
+    }
+    let root = project_root(file);
+    cache.insert(start, root.clone());
+    root
 }
 
 pub fn is_example_filename(name: &str) -> bool {
@@ -603,6 +653,61 @@ mod tests {
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].name, "web");
         assert_eq!(projects[0].branch, "main");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn files_are_listed_before_git_identity() {
+        let root = scratch();
+        let repo = root.join("checkout");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::write(repo.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(
+            repo.join(".git").join("config"),
+            "[remote \"origin\"]\n\turl = https://github.com/acme/billing.git\n",
+        )
+        .unwrap();
+        fs::write(repo.join(".env"), "A=1\n").unwrap();
+
+        let (mut projects, _) = discover_files(&[root.clone()], &Config::default());
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "checkout");
+        assert_eq!(projects[0].branch, "…");
+        assert_eq!(projects[0].files.len(), 1);
+
+        attach_git_identity(&mut projects, &Config::default());
+        assert_eq!(projects[0].name, "billing");
+        assert_eq!(projects[0].branch, "main");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scan_skips_heavy_directories_and_stops_at_max_depth() {
+        let root = scratch();
+        fs::write(root.join(".env"), "ROOT=1\n").unwrap();
+        for skip in ["node_modules", "target", ".git", "dist", ".next"] {
+            let dir = root.join(skip);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(".env"), "SKIP=1\n").unwrap();
+        }
+        let mut deep = root.clone();
+        for index in 0..=MAX_SCAN_DEPTH {
+            deep.push(format!("d{index}"));
+        }
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join(".env"), "DEEP=1\n").unwrap();
+
+        let (projects, _) = discover_files(&[root.clone()], &Config::default());
+        let keys: Vec<_> = projects
+            .iter()
+            .flat_map(|project| project.files.iter().flat_map(|file| file.keys.iter()))
+            .cloned()
+            .collect();
+        assert!(keys.iter().any(|key| key == "ROOT"), "{keys:?}");
+        assert!(!keys.iter().any(|key| key == "SKIP"), "{keys:?}");
+        assert!(!keys.iter().any(|key| key == "DEEP"), "{keys:?}");
+        assert!(is_skipped_dir("node_modules"));
+        assert!(!is_skipped_dir("src"));
         let _ = fs::remove_dir_all(&root);
     }
 }

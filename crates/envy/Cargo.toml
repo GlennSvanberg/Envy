@@ -17,4 +17,3 @@ global-hotkey = "0.7"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
-rfd = "0.15"

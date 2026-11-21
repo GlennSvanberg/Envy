@@ -3,16 +3,21 @@
 //! The first process listens on `127.0.0.1` and writes the port next to the
 //! config. A later process connects, sends its arguments (a deeplink or
 //! `activate`), and exits. The listener never receives file contents.
+//!
+//! Accepting a connection and reading the line happens on a background thread.
+//! The window only calls [`Instance::poll`], which never blocks.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 use std::time::Duration;
 
 use envy_core::config_dir;
 
 pub struct Instance {
-    listener: TcpListener,
+    messages: Receiver<String>,
 }
 
 pub fn claim_or_forward(payload: &str) -> Option<Instance> {
@@ -30,31 +35,47 @@ pub fn claim_or_forward(payload: &str) -> Option<Instance> {
         }
         let _ = std::fs::write(&port_path, port.to_string());
     }
-    Some(Instance { listener })
+    let (tx, rx) = mpsc::channel();
+    thread::Builder::new()
+        .name("envy-instance".into())
+        .spawn(move || listen(listener, tx))
+        .ok()?;
+    Some(Instance { messages: rx })
 }
 
 impl Instance {
-    /// Lines sent by later launches. Non-blocking.
+    /// Lines sent by later launches. Never blocks.
     pub fn poll(&self) -> Vec<String> {
         let mut messages = Vec::new();
         loop {
-            match self.listener.accept() {
-                Ok((mut stream, _)) => {
-                    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
-                    let mut buf = String::new();
-                    let _ = stream.read_to_string(&mut buf);
-                    if let Some(line) = buf.lines().next() {
-                        let line = line.trim();
-                        if !line.is_empty() {
-                            messages.push(line.to_string());
-                        }
-                    }
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(_) => break,
+            match self.messages.try_recv() {
+                Ok(message) => messages.push(message),
+                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             }
         }
         messages
+    }
+}
+
+fn listen(listener: TcpListener, tx: mpsc::Sender<String>) {
+    loop {
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                let mut buf = String::new();
+                let _ = stream.read_to_string(&mut buf);
+                if let Some(line) = buf.lines().next() {
+                    let line = line.trim();
+                    if !line.is_empty() && tx.send(line.to_string()).is_err() {
+                        break;
+                    }
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(40));
+            }
+            Err(_) => thread::sleep(Duration::from_millis(40)),
+        }
     }
 }
 
