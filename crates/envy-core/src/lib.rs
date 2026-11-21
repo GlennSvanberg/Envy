@@ -44,9 +44,10 @@ pub use document::{
     Node, QuoteStyle, UnreadableLine, VerbatimKind,
 };
 pub use hotkey::{Hotkey, HotkeyError};
-pub use interact::{row_click, RowClick, RowTarget};
+pub use interact::{route_value_edit, row_click, RowClick, RowTarget, ValueMotion, ValueRoute};
 pub use names::{
-    check_env_filename, env_name_taken, normalize_env_filename, rename_env_file, EnvFileNameError,
+    check_env_filename, env_name_taken, next_env_filename, normalize_env_filename, rename_env_file,
+    EnvFileNameError,
 };
 pub use paste::{apply_paste, plan_paste, PasteChange, PastePlan};
 pub use pathfmt::{

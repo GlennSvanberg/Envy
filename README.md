@@ -15,8 +15,8 @@ The window is [GPUI](https://github.com/zed-industries/zed) through [gpui-kit](h
 
 - Add folders. Envy lists `.env`, `.env.*`, and `*.env` as it finds them, skips dependency directories, and groups files by git repo. The list is saved, so the next launch shows it and then refreshes.
 - Comments, blank lines, quoting, `export`, and multiline values stay as they were. Only the keys you change are rewritten.
-- Enter edits the value in the row. Esc cancels. Enter or Tab commits.
-- Undo and redo (`Ctrl+Z`, `Ctrl+Y` or `Ctrl+Shift+Z`). `Ctrl+S` writes the file. Switching files or closing the window also writes unsaved edits.
+- Enter edits the value in the row. Tab and Shift+Tab move to the next and previous value. Enter commits and moves to the next value. Esc cancels. Clicking another value does the same.
+- Every committed edit is written immediately. Undo and redo (`Ctrl+Z`, `Ctrl+Y` or `Ctrl+Shift+Z`) stay, and they are written too. A plain-text edit is written after a short pause.
 - Save writes a sibling file, then replaces the original. A crash before the replace leaves the `.env` intact.
 - Values are masked. Reveal one key, or all of them. Copy clears the clipboard after 30 seconds unless you turn that off.
 - Ctrl+click or Shift+click two file tabs to compare them. Keys line up in two columns. Each row can copy a value either way, and each side can copy every missing key. A plain click returns to the file.
@@ -50,7 +50,7 @@ Press `?` for the same list inside the window.
 | `x` `Delete` `Backspace` | Remove the key |
 | `Ctrl+Z` | Undo |
 | `Ctrl+Y` or `Ctrl+Shift+Z` | Redo |
-| `Ctrl+S` | Save |
+| `Tab` / `Shift+Tab` | Next or previous value, while a value is open |
 | `Ctrl+V` | Paste `KEY=value` lines |
 | `Ctrl+Shift+N` | New `.env.local` from the example |
 | `Ctrl+O` | Add a folder |

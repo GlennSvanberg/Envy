@@ -50,8 +50,8 @@ Envy separates **chrome** (title bar, sidebar, tab strip, footer) from the **can
 | `accent` | `#34D399` | `#047857` | Active tab underline, pinned star, primary button, active toggles, search highlight |
 | `accent.ring` | `#34D399` @ 26% | `#047857` @ 28% | Quiet 1 px focused-row hairline, active toggle border, input focus border |
 | `accent.subtle` | `#34D399` @ 11% | `#047857` @ 9% | Active/toggled icon button fill, primary icon well, compare badges |
-| `status.warning` | `#F59E0B` | `#B45309` | Missing-vs-example pill text, unsaved dot, diff-changed glyph |
-| `status.warning_dot` | `#F59E0B` | `#D97706` | 6 px unsaved dot and missing-keys drift indicator |
+| `status.warning` | `#F59E0B` | `#B45309` | Missing-vs-example pill text, diff-changed glyph |
+| `status.warning_dot` | `#F59E0B` | `#D97706` | Missing-keys drift indicator |
 | `status.warning_bg` | `#F59E0B` @ 9% | `#D97706` @ 9% | Missing-vs-example pill background |
 | `status.warning_border` | `#F59E0B` @ 22% | `#D97706` @ 22% | Missing-vs-example pill border |
 | `status.prod` | `#E5484D` | `#DC2626` | 6 px production file marker dot |
@@ -153,8 +153,7 @@ Two font families only:
   - **Keyboard focus (`zone == Zone::Tabs`):** The focused cursor tab displays a crisp `1 px` `accent.ring` outline and subtle `accent.subtle` fill.
   - **Indicators:**
     - Production file: `6 px` red dot (`status.prod`) before the filename.
-    - Dirty (unsaved open file): `6 px` amber dot (`status.warning_dot`) after the filename.
-    - Missing keys vs `.env.example` (when not dirty): subtle `5 px` amber outline/dot (`status.warning_dot` @ 65%) after the filename with tooltip `"Missing keys vs .env.example"`.
+    - Missing keys vs `.env.example`: subtle `5 px` amber dot (`status.warning_dot` @ 65%) after the filename with tooltip `"Missing keys vs .env.example"`.
 
 ### 5.3 Workspace Toolbar
 - Height `40 px`, `px(12 px)`, `bg.canvas`, `border_b_1` (`border.hairline`), `items_center`, `justify_between`.
@@ -172,10 +171,9 @@ Two font families only:
 - **Right region (`gap(4 px)` within groups, `1 px × 16 px` `border.hairline` dividers with `mx(4 px)` between groups):**
   - *Edit group:*
     - `Copy` — Copy all enabled keys as `KEY=value` lines
-    - `Plus` — New file in the current project (asks for a name, default `.env.local`)
+    - `Plus` — New file in the current project (asks for a name, default `.env`, or the next free name)
     - `Undo2` — Undo (`Ctrl+Z`), disabled state when `!can_undo`
     - `Redo2` — Redo (`Ctrl+Y`), disabled state when `!can_redo`
-    - `Save` — Save (`Ctrl+S`), accented fill (`accent.subtle`, `1 px accent.ring`, icon in `accent`) when dirty; disabled when clean
   - *View & file group:*
     - `Eye` / `EyeOff` — Show/Hide all values (`A`), selected tint when active (disabled in plain text view)
     - `FileCode` / `List` — Switch between Table and Plain text view (`Ctrl+E`), selected tint when in plain text view, preference remembered in config
@@ -194,7 +192,7 @@ Two font families only:
   - Actions spacer — `w(64 px)`, `flex_shrink_0`
 - **Key rows (`32 px`, `mx(8 px)`, `px(7 px)` + `1 px` border = `16 px` inner edge, `rounded(6 px)`):**
   - Subtle hover (`bg.hover`), selected unfocused (`bg.selected_muted`, no border), selected focused (`bg.selected_accent` + `1 px accent.ring`, `fg.primary` text).
-  - **Key column:** Leading `24 × 24 px` on/off toggle button (`ToggleRight` in `accent` for active entries, `ToggleLeft` in `fg.secondary` for commented-out/disabled entries; distinct `accent.subtle` + `accent.ring` hover state; tooltip `"Turn off · Ctrl+Space"` / `"Turn on · Ctrl+Space"`). Always visible on disabled rows; shown on active rows only when hovered or selected+focused to keep the table calm. When both an active and disabled line exist for the same key, the disabled row sits directly beneath the active row with a `10 px` indent and `11 px` `CornerDownRight` indicator (never merged). Key name in mono (`13 px / 18 px`, `fg.primary`, or `fg.tertiary` when disabled), optional `export ` prefix in `fg.tertiary`. The name is truncated only when the column cannot grow any further; the hover tooltip is the full key, and a comment directly above the key is included there and nowhere else on the row. Clicking the key name renames it. Clicking the value reveals it for editing and masks it again when the field closes.
+  - **Key column:** Leading `24 × 24 px` on/off toggle button (`ToggleRight` in `accent` for active entries, `ToggleLeft` in `fg.secondary` for commented-out/disabled entries; distinct `accent.subtle` + `accent.ring` hover state; tooltip `"Turn off · Ctrl+Space"` / `"Turn on · Ctrl+Space"`). Always visible on disabled rows; shown on active rows only when hovered or selected+focused to keep the table calm. When both an active and disabled line exist for the same key, the disabled row sits directly beneath the active row with a `10 px` indent and `11 px` `CornerDownRight` indicator (never merged). Key name in mono (`13 px / 18 px`, `fg.primary`, or `fg.tertiary` when disabled), optional `export ` prefix in `fg.tertiary`. The name is truncated only when the column cannot grow any further; the hover tooltip is the full key, and a comment directly above the key is included there and nowhere else on the row. Clicking the key name renames it. Clicking a value commits the open field and edits that value, with the text selected so typing replaces it. Tab and Shift+Tab move to the next and previous value. Enter commits and moves to the next value. Esc cancels. Up and Down do the same as Shift+Tab and Tab. The caret stays in a value field, including on the first and last row. The value is masked again when the field closes.
   - **Section dividers (`28 px`):** Standalone comments and decorated section headers (`# --- Database ---`) render as discreet non-selectable dividers (`11 px` `fg.tertiary` label + `1 px` `border.hairline`) in file order.
   - **Value column:** `flex_1`, `min_w(0)`, `mono`, `13 px / 18 px`, `truncate()`, dimmed when the row is disabled.
     - Masked: capped at **12 dots** (`•` repeated `len.min(12)`), rendered in `fg.secondary` so rows stay calm and never overflow or leak exact long secret lengths.
@@ -203,11 +201,11 @@ Two font families only:
   - **Actions column (`w(64 px)`, `flex_shrink_0`, `justify_end`, `gap(4 px)`):** `Copy` (`Copy`) and `Reveal/Hide` (`Eye` / `EyeOff`) `24 × 24 px` icon buttons. Visible when the row is selected (focused) or hovered.
   - **Tail action:** A quiet `+ Add key` ghost row (`32 px`, `fg.tertiary`) sits below the last key so the table finishes cleanly above open canvas space.
   - **Inline editing (`Value`, `Rename`, `New`) & key-name autocomplete:** Renders inside the key column, the flexible value column, and the `64 px` actions column with a monospace `Input` and no outer double-border. Once at least 1 character is typed into a new or renamed key name, a quiet compact list (max 5 keys, matching the key input width, no source badges or footer bar, lightly emphasizing the matched text) appears directly below ranked internally by sibling env files missing from this file, other discovered projects, then common env key names. Navigable with `↑`/`↓`/`Tab`/`Enter`/`Esc` or mouse click; picking a key never prefills or hints values.
-  - **File name:** `+` in the toolbar asks for a new env file name in the tab bar (default `.env.local`). Double-clicking a tab renames that file in place. Enter confirms, Esc cancels, and a name that is taken or not an env file is explained on the line under the field.
+  - **File name:** `+` in the toolbar asks for a new env file name in the tab bar. The field starts as `.env`, or the next free name (`.env.local`, `.env.development`, `.env.dev`, then `.env.2`, `.env.3`, …) when that name exists. The name is selected so it can be changed before Enter. Double-clicking a tab renames that file in place. Enter confirms, Esc cancels, and a name that is taken or not an env file is explained on the line under the field.
 
 ### 5.4b Plain Text Editor View
 - Toggled via the toolbar `FileCode` / `List` icon button or `Ctrl+E`. Choice is persisted in config (`editor_view = "table" | "text"`).
-- Edge-to-edge monospace code editor with line numbers, `.env` syntax highlighting (keys, values, strings, numbers, booleans, `${VAR}` interpolations, comments, disabled lines), native text undo/redo, and `Ctrl+S` save.
+- Edge-to-edge monospace code editor with line numbers, `.env` syntax highlighting (keys, values, strings, numbers, booleans, `${VAR}` interpolations, comments, disabled lines), and native text undo/redo. Edits are written after a short pause.
 - Unsaved changes stay losslessly synced when switching between Table and Plain text views; invalid lines stay verbatim and surface through the footer's unreadable-lines indicator.
 
 ### 5.5 Two-Column Compare View
@@ -227,8 +225,7 @@ Two font families only:
 ### 5.6 Footer / Status Bar
 - Height `28 px`, `px(12 px)`, `bg.chrome`, `border_t_1` (`border.hairline`), `items_center`, `justify_between`.
 - **Left (`flex_1`, `min_w(0)`, `gap(8 px)`):**
-  - Unsaved dot (`6 px` amber) when open file has unsaved edits.
-  - Active transient status message (`11.5 px`, `fg.secondary`), or when idle, the short project-relative path (`project/relative/.env`, `11 px`, mono, `fg.tertiary`, `truncate()`, with full absolute path in the hover tooltip).
+  - Active transient status message (`11.5 px`, `fg.secondary`). A committed edit may show `Saved.` briefly, then the line returns to the short project-relative path (`project/relative/.env`, `11 px`, mono, `fg.tertiary`, `truncate()`, with full absolute path in the hover tooltip).
   - Neutral clickable unreadable-lines note (shown only when the open file has lines that are neither comment, blank, nor assignment): e.g. `"2 lines Envy can't read"` (`bg.kbd`, `border.hairline`, `fg.secondary`, zero red/warning styling). Opens a read-only modal listing exact 1-based line numbers and raw lines.
 - **Right (`flex_shrink_0`, `gap(12 px)`):**
   - 3–4 context-sensitive shortcut hints composed of a micro keycap (`bg.kbd`, `1 px` `border.control`, `rounded(4 px)`, `px(5 px)`, `py(1 px)`, `10 px` mono, `fg.secondary`) + short label (`11 px`, `fg.tertiary`).

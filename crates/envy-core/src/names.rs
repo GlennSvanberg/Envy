@@ -42,6 +42,29 @@ pub fn env_name_taken(name: &str, existing: &[impl AsRef<str>], ignoring: Option
     })
 }
 
+const NEW_ENV_NAMES: &[&str] = &[".env", ".env.local", ".env.development", ".env.dev"];
+
+/// The name a new file starts with. `.env` when it is free, then the next
+/// common name, then `.env.2`, `.env.3`, and so on.
+pub fn next_env_filename(existing: &[impl AsRef<str>]) -> String {
+    for name in NEW_ENV_NAMES {
+        if !env_name_taken(name, existing, None) {
+            return (*name).to_string();
+        }
+    }
+    let mut n = 2u32;
+    loop {
+        let name = format!(".env.{n}");
+        if !env_name_taken(&name, existing, None) {
+            return name;
+        }
+        n = n.saturating_add(1);
+        if n == u32::MAX {
+            return ".env.new".to_string();
+        }
+    }
+}
+
 pub fn check_env_filename(
     name: &str,
     existing: &[impl AsRef<str>],
@@ -124,6 +147,26 @@ mod tests {
         assert_eq!(
             check_env_filename(".ENV", &[".env"], Some(".env")).as_deref(),
             Ok(".ENV")
+        );
+    }
+
+    #[test]
+    fn new_file_prefers_env_then_the_next_free_name() {
+        assert_eq!(next_env_filename(&[] as &[&str]), ".env");
+        assert_eq!(next_env_filename(&[".env"]), ".env.local");
+        assert_eq!(
+            next_env_filename(&[".env", ".env.local", ".env.development", ".env.dev"]),
+            ".env.2"
+        );
+        assert_eq!(
+            next_env_filename(&[
+                ".ENV",
+                ".env.local",
+                ".env.development",
+                ".env.dev",
+                ".env.2"
+            ]),
+            ".env.3"
         );
     }
 

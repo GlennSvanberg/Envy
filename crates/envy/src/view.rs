@@ -18,10 +18,11 @@ use envy_core::{
     abbreviate_home, attach_git_identity, cache_from_projects, check_env_filename,
     clamp_key_column_px, clamp_sidebar_px, diff, fill_key_index, fitted_key_column_px,
     from_example, host_path_style, is_env_key, load_index_cache, match_span, native_project_path,
-    plan_paste, projects_from_cache, rename_env_file, row_click, save_index_cache, save_text,
-    scan_paths, sidebar_path_chars, sidebar_rank, suggest_keys, truncate_path_head, upsert_file,
-    Config, Deeplink, EditorView, EnvDocument, EnvFile, EnvFileNameError, FoundEnv, KeySuggestion,
-    OpenFile, PathStyle, Project, RowClick, RowTarget, ScanError, ThemeSetting,
+    next_env_filename, plan_paste, projects_from_cache, rename_env_file, route_value_edit,
+    row_click, save_index_cache, save_text, scan_paths, sidebar_path_chars, sidebar_rank,
+    suggest_keys, truncate_path_head, upsert_file, Config, Deeplink, EditorView, EnvDocument,
+    EnvFile, EnvFileNameError, FoundEnv, KeySuggestion, OpenFile, PathStyle, Project, RowClick,
+    RowTarget, ScanError, ThemeSetting, ValueMotion,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -51,6 +52,8 @@ use crate::theme::{
 };
 
 const CLEAR_AFTER: Duration = Duration::from_secs(30);
+const TEXT_SAVE_AFTER: Duration = Duration::from_millis(450);
+const SAVED_FLASH_AFTER: Duration = Duration::from_millis(900);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Zone {
@@ -157,6 +160,13 @@ pub struct EnvyApp {
     text_editor_syncing: bool,
     text_editor_needs_sync: bool,
     text_session_before: Option<EnvDocument>,
+    /// Bumped whenever a plain-text edit should wait again before writing.
+    text_save_gen: u64,
+    /// Bumped so a stale "Saved." timer cannot clear a newer message.
+    saved_flash: u64,
+    reload_keep_cursor: bool,
+    /// Set when a value-field key was already handled in the capture phase.
+    value_key_from_capture: bool,
     diff_open: bool,
     diff_cursor: usize,
     diff_left: Option<usize>,
@@ -281,6 +291,10 @@ impl EnvyApp {
             text_editor_syncing: false,
             text_editor_needs_sync: false,
             text_session_before: None,
+            text_save_gen: 0,
+            saved_flash: 0,
+            reload_keep_cursor: false,
+            value_key_from_capture: false,
             diff_open: false,
             diff_cursor: 0,
             diff_left: None,
@@ -506,7 +520,7 @@ impl EnvyApp {
                             this.text_session_before = Some(open.document.clone());
                         }
                         if open.set_text_live(&text) {
-                            this.mark_edited();
+                            this.mark_edited(cx);
                             cx.notify();
                         }
                     }
@@ -1007,6 +1021,18 @@ impl EnvyApp {
             }
             return;
         }
+        if self.editing_value() {
+            self.apply_value_route(
+                if forward {
+                    ValueMotion::Next
+                } else {
+                    ValueMotion::Previous
+                },
+                window,
+                cx,
+            );
+            return;
+        }
         if self.editor.is_some() {
             self.commit_focused_field(window, cx);
             return;
@@ -1306,9 +1332,10 @@ impl EnvyApp {
             return;
         }
         self.finalize_text_session();
+        self.text_save_gen = self.text_save_gen.wrapping_add(1);
         if let Some(open) = self.open.as_ref() {
             if open.is_dirty() {
-                self.enqueue_save(cx);
+                self.queue_save(true, cx);
             }
         }
         self.io_epoch = self.io_epoch.wrapping_add(1);
@@ -1319,10 +1346,19 @@ impl EnvyApp {
     }
 
     fn enqueue_save(&mut self, cx: &mut Context<Self>) {
+        self.queue_save(false, cx);
+    }
+
+    /// `force` writes even while a disk-change banner is up (leaving the file,
+    /// closing the window, or keeping this copy).
+    fn queue_save(&mut self, force: bool, cx: &mut Context<Self>) {
         let Some(open) = &self.open else {
             return;
         };
         if !open.is_dirty() {
+            return;
+        }
+        if !force && open.external_change {
             return;
         }
         self.save_seq = self.save_seq.wrapping_add(1);
@@ -1332,7 +1368,6 @@ impl EnvyApp {
             path: open.path.clone(),
             text: open.document.serialize(),
         });
-        self.status = "Saving…".into();
         self.pump_io(cx);
     }
 
@@ -1375,9 +1410,7 @@ impl EnvyApp {
                                 open.note_saved(text, mtime);
                             }
                         }
-                        if self.status == "Saving…" {
-                            self.status = "Saved.".into();
-                        }
+                        self.note_quiet_saved(cx);
                     }
                 }
                 Err(err) => {
@@ -1429,7 +1462,16 @@ impl EnvyApp {
                         if let Some(open) = self.open.as_mut() {
                             open.replace_from_disk(fresh);
                         }
-                        self.cursor = 0;
+                        if !self.reload_keep_cursor {
+                            self.cursor = 0;
+                        }
+                        self.reload_keep_cursor = false;
+                        let len = self.visible_entry_nodes().len();
+                        if len == 0 {
+                            self.cursor = 0;
+                        } else if self.cursor >= len {
+                            self.cursor = len - 1;
+                        }
                         self.text_session_before = None;
                         self.text_editor_needs_sync = true;
                         self.sync_keys();
@@ -1475,7 +1517,14 @@ impl EnvyApp {
                     .as_mut()
                     .is_some_and(|open| open.apply_disk_notice(notice));
                 if tell {
-                    view.status = "Changed on disk. R reloads, Esc keeps yours.".into();
+                    let mid_edit = view.editor.is_some()
+                        || view.editor_view == EditorView::Text
+                        || view.open.as_ref().is_some_and(|open| open.is_dirty());
+                    if mid_edit {
+                        view.status = "Changed on disk. R reloads, Esc keeps yours.".into();
+                    } else {
+                        view.begin_reload(true, cx);
+                    }
                     cx.notify();
                 }
             });
@@ -1673,8 +1722,9 @@ impl EnvyApp {
     /// so the window stays up until the write finishes.
     pub fn close_requested(&mut self, cx: &mut Context<Self>) -> bool {
         self.finalize_text_session();
+        self.text_save_gen = self.text_save_gen.wrapping_add(1);
         if self.open.as_ref().is_some_and(|open| open.is_dirty()) {
-            self.enqueue_save(cx);
+            self.queue_save(true, cx);
             self.io_queue.push_back(IoJob::Quit);
             self.pump_io(cx);
             false
@@ -1686,11 +1736,12 @@ impl EnvyApp {
 
     fn save_open(&mut self, cx: &mut Context<Self>) {
         self.finalize_text_session();
-        self.enqueue_save(cx);
+        self.text_save_gen = self.text_save_gen.wrapping_add(1);
+        self.queue_save(true, cx);
         cx.notify();
     }
 
-    fn mark_edited(&mut self) {
+    fn mark_edited(&mut self, cx: &mut Context<Self>) {
         self.io_epoch = self.io_epoch.wrapping_add(1);
         self.io_queue
             .retain(|job| !matches!(job, IoJob::Load { .. }));
@@ -1699,7 +1750,52 @@ impl EnvyApp {
             self.text_editor_needs_sync = true;
         }
         self.sync_keys();
-        self.status = "Edited. Ctrl+S saves.".into();
+        if self.status == "Saved." {
+            self.status.clear();
+            self.saved_flash = self.saved_flash.wrapping_add(1);
+        }
+        if self.editor_view == EditorView::Text {
+            self.schedule_text_save(cx);
+        } else {
+            self.enqueue_save(cx);
+        }
+    }
+
+    fn schedule_text_save(&mut self, cx: &mut Context<Self>) {
+        self.text_save_gen = self.text_save_gen.wrapping_add(1);
+        let gen = self.text_save_gen;
+        cx.spawn(async move |this, async_cx| {
+            async_cx.background_executor().timer(TEXT_SAVE_AFTER).await;
+            let _ = this.update(async_cx, |view, cx| {
+                if view.text_save_gen != gen || view.editor_view != EditorView::Text {
+                    return;
+                }
+                view.enqueue_save(cx);
+            });
+        })
+        .detach();
+    }
+
+    fn note_quiet_saved(&mut self, cx: &mut Context<Self>) {
+        if !(self.status.is_empty() || self.status == "Saving…" || self.status == "Saved.") {
+            return;
+        }
+        self.status = "Saved.".into();
+        self.saved_flash = self.saved_flash.wrapping_add(1);
+        let token = self.saved_flash;
+        cx.spawn(async move |this, async_cx| {
+            async_cx
+                .background_executor()
+                .timer(SAVED_FLASH_AFTER)
+                .await;
+            let _ = this.update(async_cx, |view, cx| {
+                if view.saved_flash == token && view.status == "Saved." {
+                    view.status.clear();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn finalize_text_session(&mut self) {
@@ -1749,6 +1845,8 @@ impl EnvyApp {
             }
             EditorView::Text => {
                 self.finalize_text_session();
+                self.text_save_gen = self.text_save_gen.wrapping_add(1);
+                self.enqueue_save(cx);
                 self.editor_view = EditorView::Table;
                 self.zone = Zone::Keys;
                 let len = self.visible_entry_nodes().len();
@@ -2058,11 +2156,11 @@ impl EnvyApp {
             (editor.kind_tag(), key_focused, key_text, value_text)
         };
         match (tag, key_focused) {
-            (EditTag::New, true) => self.focus_value_editor(window, cx),
+            (EditTag::New, true) => self.hold_value_editor(true, window, cx),
             (EditTag::Rename, true) => {
                 self.commit_editor_key(key_text.unwrap_or_default(), window, cx);
             }
-            _ => self.commit_editor(Some(value_text), window, cx),
+            _ => self.commit_editor(Some(value_text), true, window, cx),
         }
     }
 
@@ -2075,6 +2173,10 @@ impl EnvyApp {
             self.close_file_prompt();
             self.focus_self(window, cx);
             cx.notify();
+            return;
+        }
+        if self.editing_value() {
+            self.apply_value_route(ValueMotion::Cancel, window, cx);
             return;
         }
         if self.editor.is_some() {
@@ -2112,6 +2214,7 @@ impl EnvyApp {
                 open.dismiss_external();
             }
             self.status = "Keeping your copy.".into();
+            self.queue_save(true, cx);
             cx.notify();
             return;
         }
@@ -2177,6 +2280,73 @@ impl EnvyApp {
         self.key_scroll.scroll_to_bottom();
     }
 
+    fn editing_value(&self) -> bool {
+        self.editor
+            .as_ref()
+            .is_some_and(|editor| matches!(editor.kind, EditKind::Value))
+    }
+
+    fn apply_value_route(
+        &mut self,
+        motion: ValueMotion,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let len = self.visible_entry_nodes().len();
+        let route = route_value_edit(self.cursor, len, motion);
+        if route.commit {
+            self.commit_editor(None, false, window, cx);
+        } else {
+            self.close_editor();
+        }
+        if let Some(row) = route.focus_row {
+            self.cursor = row.min(len.saturating_sub(1));
+            self.zone = Zone::Keys;
+            self.begin_value_edit(window, cx);
+        } else {
+            self.focus_self(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn place_value_caret(&self, select: bool, window: &mut Window, cx: &mut App) {
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        let handle = editor.value.focus_handle(cx);
+        if select && !handle.is_focused(window) {
+            editor
+                .value
+                .update(cx, |state, cx| state.select_all(window, cx));
+        }
+        window.focus(&handle, cx);
+    }
+
+    fn hold_value_editor(&mut self, select: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.place_value_caret(select, window, cx);
+        cx.defer_in(window, move |this, window, cx| {
+            this.place_value_caret(select, window, cx);
+        });
+    }
+
+    fn place_key_caret(&self, select: bool, window: &mut Window, cx: &mut App) {
+        let Some(key) = self.editor.as_ref().and_then(|editor| editor.key.as_ref()) else {
+            return;
+        };
+        let handle = key.focus_handle(cx);
+        if select && !handle.is_focused(window) {
+            key.update(cx, |state, cx| state.select_all(window, cx));
+        }
+        window.focus(&handle, cx);
+    }
+
+    fn hold_key_editor(&mut self, select: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.place_key_caret(select, window, cx);
+        cx.defer_in(window, move |this, window, cx| {
+            this.place_key_caret(select, window, cx);
+        });
+    }
+
     fn edit_entry_at(
         &mut self,
         row_ix: usize,
@@ -2185,19 +2355,29 @@ impl EnvyApp {
         cx: &mut Context<Self>,
     ) {
         self.zone = Zone::Keys;
-        self.cursor = row_ix;
+        let node = self.visible_entry_nodes().get(row_ix).copied();
         let same = self.editor.as_ref().is_some_and(|editor| {
-            editor.node == self.selected_node()
+            editor.node == node
                 && matches!(
                     (target, &editor.kind),
                     (RowTarget::KeyName, EditKind::Rename) | (RowTarget::Value, EditKind::Value)
                 )
         });
         if same {
+            self.cursor = row_ix;
+            match target {
+                RowTarget::Value => self.hold_value_editor(false, window, cx),
+                RowTarget::KeyName => self.hold_key_editor(false, window, cx),
+            }
             return;
         }
+        if matches!(target, RowTarget::Value) && self.editing_value() {
+            self.apply_value_route(ValueMotion::To(row_ix), window, cx);
+            return;
+        }
+        self.cursor = row_ix;
         if self.editor.is_some() {
-            self.commit_editor(None, window, cx);
+            self.commit_editor(None, false, window, cx);
             self.cursor = row_ix;
         }
         match row_click(target) {
@@ -2311,7 +2491,7 @@ impl EnvyApp {
                             let key = input.read(cx).value().to_string();
                             this.commit_editor_key(key, window, cx);
                         } else {
-                            this.focus_value_editor(window, cx);
+                            this.hold_value_editor(true, window, cx);
                         }
                     }
                     InputEvent::Focus | InputEvent::Blur => {}
@@ -2323,8 +2503,15 @@ impl EnvyApp {
             window,
             |this, state, event, window, cx| {
                 if let InputEvent::PressEnter { .. } = event {
+                    if this.editing_value() {
+                        if this.value_key_from_capture {
+                            return;
+                        }
+                        this.apply_value_route(ValueMotion::Next, window, cx);
+                        return;
+                    }
                     let text = state.read(cx).value().to_string();
-                    this.commit_editor(Some(text), window, cx);
+                    this.commit_editor(Some(text), true, window, cx);
                 }
             },
         ));
@@ -2340,18 +2527,11 @@ impl EnvyApp {
         });
         if focus_key {
             self.refresh_editor_suggestions(&initial_query);
-            self.focus_key_editor(window, cx);
+            self.hold_key_editor(true, window, cx);
         } else {
-            self.focus_value_editor(window, cx);
+            self.hold_value_editor(true, window, cx);
         }
         cx.notify();
-    }
-
-    fn focus_key_editor(&self, window: &mut Window, cx: &mut App) {
-        if let Some(key) = self.editor.as_ref().and_then(|editor| editor.key.as_ref()) {
-            let handle = key.focus_handle(cx);
-            window.focus(&handle, cx);
-        }
     }
 
     fn focus_value_editor(&self, window: &mut Window, cx: &mut App) {
@@ -2364,7 +2544,7 @@ impl EnvyApp {
     fn commit_editor_key(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
         let node = self.editor.as_ref().and_then(|editor| editor.node);
         self.close_editor();
-        self.write_key(node, key);
+        self.write_key(node, key, cx);
         self.focus_self(window, cx);
         cx.notify();
     }
@@ -2372,6 +2552,7 @@ impl EnvyApp {
     fn commit_editor(
         &mut self,
         value_text: Option<String>,
+        restore_focus: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2392,15 +2573,17 @@ impl EnvyApp {
         });
         self.close_editor();
         match kind {
-            EditTag::Value => self.write_value(node, value_text),
-            EditTag::Rename => self.write_key(node, key_text.unwrap_or_default()),
-            EditTag::New => self.write_new(key_text.unwrap_or_default(), value_text),
+            EditTag::Value => self.write_value(node, value_text, cx),
+            EditTag::Rename => self.write_key(node, key_text.unwrap_or_default(), cx),
+            EditTag::New => self.write_new(key_text.unwrap_or_default(), value_text, cx),
         }
-        self.focus_self(window, cx);
+        if restore_focus {
+            self.focus_self(window, cx);
+        }
         cx.notify();
     }
 
-    fn write_value(&mut self, node: Option<usize>, value: String) {
+    fn write_value(&mut self, node: Option<usize>, value: String, cx: &mut Context<Self>) {
         let Some(node) = node else {
             return;
         };
@@ -2422,10 +2605,10 @@ impl EnvyApp {
                 entry.set_value(value);
             }
         });
-        self.mark_edited();
+        self.mark_edited(cx);
     }
 
-    fn write_key(&mut self, node: Option<usize>, key: String) {
+    fn write_key(&mut self, node: Option<usize>, key: String, cx: &mut Context<Self>) {
         let key = key.trim().to_string();
         if !is_env_key(&key) {
             self.status = "Keys start with a letter or underscore.".into();
@@ -2457,12 +2640,12 @@ impl EnvyApp {
                 entry.set_key(&key);
             }
         });
-        self.mark_edited();
+        self.mark_edited(cx);
         self.jump_to_key(&key);
-        self.status = format!("Renamed to {key}. Ctrl+S saves.");
+        self.status = format!("Renamed to {key}.");
     }
 
-    fn write_new(&mut self, key: String, value: String) {
+    fn write_new(&mut self, key: String, value: String, cx: &mut Context<Self>) {
         let key = key.trim().to_string();
         if !is_env_key(&key) {
             self.status = "Keys start with a letter or underscore.".into();
@@ -2482,12 +2665,12 @@ impl EnvyApp {
                 document.push_entry(key.clone(), value);
             }
         });
-        self.mark_edited();
+        self.mark_edited(cx);
         self.jump_to_key(&key);
         self.status = if exists {
-            format!("Updated {key}. Ctrl+S saves.")
+            format!("Updated {key}.")
         } else {
-            format!("Added {key}. Ctrl+S saves.")
+            format!("Added {key}.")
         };
     }
 
@@ -2625,11 +2808,11 @@ impl EnvyApp {
         {
             self.cursor = pos;
         }
-        self.mark_edited();
+        self.mark_edited(cx);
         self.status = if disabled {
-            format!("Turned off {key}. Ctrl+S saves.")
+            format!("Turned off {key}.")
         } else {
-            format!("Turned on {key}. Ctrl+S saves.")
+            format!("Turned on {key}.")
         };
         cx.notify();
     }
@@ -2653,7 +2836,7 @@ impl EnvyApp {
         } else if self.cursor >= len {
             self.cursor = len - 1;
         }
-        self.mark_edited();
+        self.mark_edited(cx);
         self.status = format!("Removed {key}. Ctrl+Z brings it back.");
         self.focus_self(window, cx);
         cx.notify();
@@ -2671,11 +2854,10 @@ impl EnvyApp {
         }
         self.text_editor_needs_sync = true;
         self.sync_keys();
-        self.status = if self.open.as_ref().is_some_and(|open| open.is_dirty()) {
-            "Undone. Ctrl+S saves.".into()
-        } else {
-            "Undone.".into()
-        };
+        self.io_epoch = self.io_epoch.wrapping_add(1);
+        self.diff_stale = true;
+        self.enqueue_save(cx);
+        self.status = "Undone.".into();
         cx.notify();
     }
 
@@ -2689,21 +2871,25 @@ impl EnvyApp {
         }
         self.text_editor_needs_sync = true;
         self.sync_keys();
-        self.status = if self.open.as_ref().is_some_and(|open| open.is_dirty()) {
-            "Redone. Ctrl+S saves.".into()
-        } else {
-            "Redone.".into()
-        };
+        self.io_epoch = self.io_epoch.wrapping_add(1);
+        self.diff_stale = true;
+        self.enqueue_save(cx);
+        self.status = "Redone.".into();
         cx.notify();
     }
 
     fn reload_external(&mut self, cx: &mut Context<Self>) {
+        self.begin_reload(false, cx);
+    }
+
+    fn begin_reload(&mut self, keep_cursor: bool, cx: &mut Context<Self>) {
         let Some(open) = &self.open else {
             return;
         };
         if !open.external_change {
             return;
         }
+        self.reload_keep_cursor = keep_cursor;
         self.io_epoch = self.io_epoch.wrapping_add(1);
         let epoch = self.io_epoch;
         let path = open.path.clone();
@@ -3026,11 +3212,23 @@ impl EnvyApp {
             return;
         }
         if self.editor.is_some() {
-            self.commit_editor(None, window, cx);
+            self.commit_editor(None, false, window, cx);
         }
+        let names = self
+            .project_ix
+            .and_then(|ix| self.projects.get(ix))
+            .map(|project| {
+                project
+                    .files
+                    .iter()
+                    .map(|file| file.name.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let name = next_env_filename(&names);
         let input = cx.new(|cx| {
             InputState::new(window, cx)
-                .default_value(".env.local")
+                .default_value(name)
                 .placeholder("File name")
         });
         self.open_file_prompt(FilePrompt::Create { input, error: None }, window, cx);
@@ -3046,7 +3244,7 @@ impl EnvyApp {
             return;
         };
         if self.editor.is_some() {
-            self.commit_editor(None, window, cx);
+            self.commit_editor(None, false, window, cx);
         }
         let input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -3245,9 +3443,9 @@ impl EnvyApp {
             return;
         };
         open.apply_paste(&plan);
-        self.mark_edited();
+        self.mark_edited(cx);
         self.status = format!(
-            "Pasted {} added, {} overwritten. Ctrl+S saves.",
+            "Pasted {} added, {} overwritten.",
             plan.added(),
             plan.overwritten()
         );
@@ -3256,6 +3454,7 @@ impl EnvyApp {
     }
 
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.value_key_from_capture = false;
         let mods = &event.keystroke.modifiers;
         let key = event.keystroke.key.as_str();
         if mods.control && !mods.alt && !mods.platform && matches!(self.overlay, Overlay::None) {
@@ -3322,6 +3521,26 @@ impl EnvyApp {
                     return;
                 }
                 _ => {}
+            }
+        }
+        if self.editing_value()
+            && matches!(self.overlay, Overlay::None)
+            && matches!(key, "tab" | "enter" | "up" | "down")
+        {
+            let motion = match key {
+                "up" => Some(ValueMotion::Previous),
+                "down" => Some(ValueMotion::Next),
+                "tab" if mods.shift => Some(ValueMotion::Previous),
+                "tab" => Some(ValueMotion::Next),
+                "enter" if !mods.shift => Some(ValueMotion::Next),
+                _ => None,
+            };
+            if let Some(motion) = motion {
+                self.value_key_from_capture = true;
+                self.apply_value_route(motion, window, cx);
+                window.prevent_default();
+                cx.stop_propagation();
+                return;
             }
         }
         match key {
@@ -4163,7 +4382,6 @@ impl EnvyApp {
             .unwrap_or_default();
         let file_ix = self.file_ix;
         let zone = self.zone;
-        let dirty = self.open.as_ref().is_some_and(|open| open.is_dirty());
         let can_compare = file_tabs.len() >= 2;
 
         let mut tabs = h_flex()
@@ -4187,7 +4405,6 @@ impl EnvyApp {
             } else {
                 file_ix == Some(index)
             };
-            let is_open_dirty = file_ix == Some(index) && dirty;
             let cursor_tab = zone == Zone::Tabs && self.tab_cursor == index;
             let entity = cx.entity();
             let name = file.name.clone();
@@ -4202,9 +4419,7 @@ impl EnvyApp {
             if file.prod {
                 tip_parts.push("Production".into());
             }
-            if is_open_dirty {
-                tip_parts.push("Unsaved changes".into());
-            } else if file.missing_vs_example {
+            if file.missing_vs_example {
                 tip_parts.push("Missing keys vs .env.example".into());
             }
             if can_compare && !self.diff_open && file_ix != Some(index) {
@@ -4296,15 +4511,7 @@ impl EnvyApp {
 
             tab = tab.child(div().truncate().child(name));
 
-            if is_open_dirty {
-                tab = tab.child(
-                    div()
-                        .size(px(6.))
-                        .rounded(px(999.))
-                        .bg(p.warning_dot)
-                        .flex_shrink_0(),
-                );
-            } else if file.missing_vs_example {
+            if file.missing_vs_example {
                 tab = tab.child(
                     div()
                         .size(px(5.))
@@ -4363,7 +4570,6 @@ impl EnvyApp {
         let show_all = self.show_all;
         let diff_open = self.diff_open;
         let text_mode = !diff_open && self.editor_view == EditorView::Text;
-        let dirty = self.open.as_ref().is_some_and(|open| open.is_dirty());
         let can_undo = self.open.as_ref().is_some_and(|open| open.can_undo());
         let can_redo = self.open.as_ref().is_some_and(|open| open.can_redo());
         let has_open = self.open.is_some();
@@ -4637,19 +4843,6 @@ impl EnvyApp {
                         let entity = entity.clone();
                         move |_, _, cx| {
                             entity.update(cx, |this, cx| this.redo(cx));
-                        }
-                    }),
-            )
-            .child(
-                toolbar_icon_button("tb-save", IconName::Save, "Save", dirty, !dirty, p)
-                    .tooltip_with_action("Save", &Save, Some("Envy"))
-                    .on_click({
-                        let entity = entity.clone();
-                        move |_, _, cx| {
-                            entity.update(cx, |this, cx| {
-                                this.save_open(cx);
-                                cx.notify();
-                            });
                         }
                     }),
             )
@@ -5671,7 +5864,6 @@ impl EnvyApp {
     ) -> gpui_kit::Div {
         let (path_short, path_full) = self.short_project_path();
         let status = self.status.clone();
-        let dirty = self.open.as_ref().is_some_and(|open| open.is_dirty());
         let unreadable_count = self
             .open
             .as_ref()
@@ -5679,17 +5871,6 @@ impl EnvyApp {
             .unwrap_or(0);
 
         let mut left = h_flex().flex_1().min_w(px(0.)).items_center().gap(px(8.));
-        if dirty {
-            left = left.child(
-                div()
-                    .id("unsaved-dot")
-                    .size(px(6.))
-                    .rounded(px(999.))
-                    .bg(p.warning_dot)
-                    .flex_shrink_0()
-                    .tooltip(hover_tip("Unsaved changes · Ctrl+S saves")),
-            );
-        }
         if !status.is_empty() {
             left = left.child(
                 div()
@@ -5755,13 +5936,15 @@ impl EnvyApp {
                 ("]", "Other file"),
                 ("Esc", "Close"),
             ]
-        } else if self.editor_view == EditorView::Text {
+        } else if self.editing_value() {
             &[
-                ("Ctrl+S", "Save"),
-                ("Ctrl+Z", "Undo"),
-                ("Ctrl+E", "Table"),
-                ("?", "Shortcuts"),
+                ("Tab", "Next value"),
+                ("Shift+Tab", "Previous"),
+                ("Enter", "Next value"),
+                ("Esc", "Cancel"),
             ]
+        } else if self.editor_view == EditorView::Text {
+            &[("Ctrl+Z", "Undo"), ("Ctrl+E", "Table"), ("?", "Shortcuts")]
         } else {
             match self.zone {
                 Zone::Projects => &[
@@ -6813,8 +6996,8 @@ impl EnvyApp {
                 DiffSide::Left => self.diff_left_doc = Some(cloned),
                 DiffSide::Right => self.diff_right_doc = Some(cloned),
             }
-            self.mark_edited();
-            self.status = format!("Copied {count} into the open file. Ctrl+S saves.");
+            self.mark_edited(cx);
+            self.status = format!("Copied {count} into the open file.");
         } else {
             let doc = match side {
                 DiffSide::Left => self.diff_left_doc.as_mut(),
@@ -7032,9 +7215,9 @@ impl EnvyApp {
 
 const SHORTCUTS: &[(&str, &str)] = &[
     ("↑  ↓", "Move in this area"),
-    ("Enter", "Open the project, or edit the value"),
-    ("Tab", "Next area"),
-    ("Shift+Tab", "Previous area"),
+    ("Enter", "Next value, or open the project"),
+    ("Tab", "Next value, or the next area"),
+    ("Shift+Tab", "Previous value, or the previous area"),
     ("←", "Back to the project list"),
     ("←  →", "Move across file tabs"),
     ("Ctrl+Tab", "Next file"),
@@ -7052,7 +7235,6 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+Space", "Turn key on or off"),
     ("Ctrl+E", "Switch table / plain text"),
     ("n", "New key"),
-    ("Ctrl+S", "Save"),
     ("Ctrl+Z", "Undo"),
     ("Ctrl+O", "Add a folder"),
     ("?", "This list"),
