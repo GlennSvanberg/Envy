@@ -9,6 +9,7 @@ mod actions;
 mod hotkey_os;
 mod instance;
 mod protocol;
+mod theme;
 mod view;
 mod watch;
 
@@ -53,6 +54,7 @@ fn main() {
         .with_assets(gpui_kit::assets::AllAssets)
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
+            theme::apply_palette(cx);
             actions::bind(cx);
             let options = EnvyApp::window_options(cx);
             let launch = launch.clone();
