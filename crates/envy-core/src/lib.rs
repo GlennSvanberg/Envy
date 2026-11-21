@@ -8,6 +8,7 @@
 //! written to config or logs. A save uses a short-lived sibling file only long
 //! enough to rename it into place. Callers must not log [`Entry::value`].
 
+pub mod cells;
 pub mod columns;
 pub mod config;
 pub mod deeplink;
@@ -26,6 +27,13 @@ pub mod session;
 pub mod suggest;
 pub mod text_field;
 
+pub use cells::{
+    display_filename_origin, display_key_origin, display_value_origin, edit_filename_origin,
+    edit_key_origin, edit_value_origin, TextOrigin, KEY_CELL_GAP_PX, KEY_CELL_PAD_RIGHT_PX,
+    KEY_LINE_PX, KEY_RELATED_ICON_PX, KEY_RELATED_PAD_PX, KEY_ROW_H_PX, KEY_TEXT_PX,
+    KEY_TOGGLE_W_PX, ROW_BORDER_PX, ROW_PAD_X_PX, TAB_DOT_PX, TAB_GAP_PX, TAB_H_PX, TAB_LINE_PX,
+    TAB_PAD_X_PX, TAB_TEXT_PX, VALUE_PAD_RIGHT_PX,
+};
 pub use columns::{
     clamp_key_column_px, clamp_sidebar_px, fitted_key_column_px, KEY_COLUMN_MAX_PX,
     KEY_COLUMN_MIN_PX, SIDEBAR_DEFAULT_PX, SIDEBAR_MAX_PX, SIDEBAR_MIN_PX,
@@ -46,8 +54,8 @@ pub use document::{
 };
 pub use hotkey::{Hotkey, HotkeyError};
 pub use interact::{
-    route_cell_edit, route_value_edit, row_click, CellMotion, CellRoute, EditCell, RowClick,
-    RowTarget, ValueMotion, ValueRoute,
+    enter_while_suggesting, is_cell_commit_key, route_cell_edit, route_value_edit, row_click,
+    CellMotion, CellRoute, EditCell, EnterEffect, RowClick, RowTarget, ValueMotion, ValueRoute,
 };
 pub use names::{
     check_env_filename, env_name_taken, next_env_filename, normalize_env_filename, rename_env_file,

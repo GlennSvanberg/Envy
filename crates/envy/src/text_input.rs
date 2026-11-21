@@ -85,7 +85,13 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("ctrl-z", CaretUndo, field),
         KeyBinding::new("ctrl-y", CaretRedo, field),
         KeyBinding::new("ctrl-shift-z", CaretRedo, field),
+        // Windows reports the main Return key and numpad Enter as the same
+        // name, "enter" (both are VK_RETURN). Linux names Return "enter" and
+        // strips the keypad prefix, so numpad Enter is "enter" there too.
+        // The extra names cover a platform that keeps the keypad prefix.
         KeyBinding::new("enter", CaretSubmit, field),
+        KeyBinding::new("kp_enter", CaretSubmit, field),
+        KeyBinding::new("numpadenter", CaretSubmit, field),
     ]);
 }
 
@@ -482,7 +488,7 @@ impl TextInput {
         if line.text.as_ref() != self.field.text() {
             return self.field.caret();
         }
-        let local = position.x - bounds.left() + self.scroll - px(1.);
+        let local = position.x - bounds.left() + self.scroll;
         line.closest_index_for_x(local)
     }
 
@@ -802,7 +808,7 @@ impl Element for TextElement {
         } else {
             scroll = px(0.);
         }
-        let origin_x = bounds.left() - scroll + px(1.);
+        let origin_x = bounds.left() - scroll;
         let selection = if focused && !placeholder && !selected.is_empty() {
             Some(fill(
                 Bounds::from_corners(
@@ -873,7 +879,7 @@ impl Element for TextElement {
             }
             if let Some(line) = prepaint.line.take() {
                 let _ = line.paint(
-                    point(bounds.left() - scroll + px(1.), bounds.top()),
+                    point(bounds.left() - scroll, bounds.top()),
                     bounds.size.height,
                     TextAlign::Left,
                     None,

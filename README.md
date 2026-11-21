@@ -15,7 +15,7 @@ The window is [GPUI](https://github.com/zed-industries/zed) through [gpui-kit](h
 
 - Add folders. Envy lists `.env`, `.env.*`, and `*.env` as it finds them, skips dependency directories, and groups files by git repo. The list is saved, so the next launch shows it and then refreshes.
 - Comments, blank lines, quoting, `export`, and multiline values stay as they were. Only the keys you change are rewritten.
-- Enter edits the value in the row. Tab and Shift+Tab move to the next and previous value. Enter commits and moves to the next value. Esc cancels. Clicking another value does the same.
+- Enter edits the value in the row. Tab and Shift+Tab move between the key and the value. Enter commits and closes the field, and the row stays selected. Esc cancels. Clicking another cell does the same.
 - Every committed edit is written immediately. Undo and redo (`Ctrl+Z`, `Ctrl+Y` or `Ctrl+Shift+Z`) stay, and they are written too. A plain-text edit is written after a short pause.
 - Save writes a sibling file, then replaces the original. A crash before the replace leaves the `.env` intact.
 - Values are masked. Reveal one key, or all of them. Copy clears the clipboard after 30 seconds unless you turn that off.
@@ -33,7 +33,7 @@ Press `?` for the same list inside the window.
 | Key | Action |
 | --- | --- |
 | `↑` `↓` | Move between rows. Inside a field, they move to the start or end of the text |
-| `Enter` | Open the project or tab. In a cell, commit and open the next row |
+| `Enter` | Open the project or tab. In a cell, commit and close the field |
 | `Tab` `Shift+Tab` | Next / previous area: projects, file tabs, keys |
 | `←` | Back to the project list. In the file tabs, the previous tab |
 | `→` | Next area, or the next tab |

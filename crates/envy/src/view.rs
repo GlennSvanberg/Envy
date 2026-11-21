@@ -16,13 +16,16 @@ use envy_core::document::{LayoutItem, Node, UnreadableLine};
 use envy_core::paste::{PasteChange, PastePlan};
 use envy_core::{
     abbreviate_home, attach_git_identity, cache_from_projects, check_env_filename,
-    clamp_key_column_px, clamp_sidebar_px, diff, fill_key_index, fitted_key_column_px,
-    from_example, host_path_style, is_env_key, load_index_cache, match_span, native_project_path,
-    next_env_filename, plan_paste, projects_from_cache, rename_env_file, route_cell_edit,
-    row_click, save_index_cache, save_text, scan_paths, sidebar_path_chars, sidebar_rank,
-    suggest_keys, truncate_path_head, upsert_file, CellMotion, Config, Deeplink, EditCell,
-    EditorView, EnvDocument, EnvFile, EnvFileNameError, FoundEnv, KeySuggestion, OpenFile,
-    PathStyle, Project, RowClick, RowTarget, ScanError, ThemeSetting,
+    clamp_key_column_px, clamp_sidebar_px, diff, enter_while_suggesting, fill_key_index,
+    fitted_key_column_px, from_example, host_path_style, is_cell_commit_key, is_env_key,
+    load_index_cache, match_span, native_project_path, next_env_filename, plan_paste,
+    projects_from_cache, rename_env_file, route_cell_edit, row_click, save_index_cache, save_text,
+    scan_paths, sidebar_path_chars, sidebar_rank, suggest_keys, truncate_path_head, upsert_file,
+    CellMotion, Config, Deeplink, EditCell, EditorView, EnterEffect, EnvDocument, EnvFile,
+    EnvFileNameError, FoundEnv, KeySuggestion, OpenFile, PathStyle, Project, RowClick, RowTarget,
+    ScanError, ThemeSetting, KEY_CELL_GAP_PX, KEY_CELL_PAD_RIGHT_PX, KEY_LINE_PX,
+    KEY_RELATED_ICON_PX, KEY_RELATED_PAD_PX, KEY_TEXT_PX, KEY_TOGGLE_W_PX, TAB_DOT_PX, TAB_GAP_PX,
+    TAB_H_PX, TAB_LINE_PX, TAB_PAD_X_PX, TAB_TEXT_PX, VALUE_PAD_RIGHT_PX,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -79,7 +82,6 @@ struct Editor {
     node: Option<usize>,
     kind: EditKind,
     suggestions: Vec<KeySuggestion>,
-    suggestion_ix: usize,
     suggestions_open: bool,
 }
 
@@ -1868,7 +1870,6 @@ impl EnvyApp {
         if let Some(editor) = self.editor.as_mut() {
             editor.suggestions_open = !suggestions.is_empty();
             editor.suggestions = suggestions;
-            editor.suggestion_ix = 0;
         }
     }
 
@@ -2227,13 +2228,21 @@ impl EnvyApp {
         let len = self.visible_entry_nodes().len();
         let route = route_cell_edit(self.cursor, len, cell, motion);
         if route.commit {
+            if matches!(cell, EditCell::Key) && !self.editor_key_is_valid(cx) {
+                self.status = "Keys start with a letter or underscore.".into();
+                self.hold_key_editor(false, window, cx);
+                cx.notify();
+                return;
+            }
             self.commit_editor(None, false, window, cx);
         } else {
             self.close_editor();
         }
-        if let (Some(row), Some(cell)) = (route.focus_row, route.focus_cell) {
+        if let Some(row) = route.focus_row {
             self.cursor = row.min(len.saturating_sub(1));
             self.zone = Zone::Keys;
+        }
+        if let Some(cell) = route.focus_cell {
             match cell {
                 EditCell::Key => self.begin_rename(window, cx),
                 EditCell::Value => self.begin_value_edit(window, cx),
@@ -2242,6 +2251,16 @@ impl EnvyApp {
             self.focus_self(window, cx);
             cx.notify();
         }
+    }
+
+    fn editor_key_is_valid(&self, cx: &App) -> bool {
+        let key = self
+            .editor
+            .as_ref()
+            .and_then(|editor| editor.key.as_ref())
+            .map(|input| input.read(cx).value().trim().to_string())
+            .unwrap_or_default();
+        is_env_key(&key)
     }
 
     fn apply_new_row_motion(
@@ -2259,23 +2278,13 @@ impl EnvyApp {
             }
             CellMotion::PrevCell if !key_focused => self.hold_key_editor(true, window, cx),
             CellMotion::PrevCell => self.hold_key_editor(false, window, cx),
-            CellMotion::NextCell | CellMotion::NextRow if key_focused => {
+            CellMotion::NextCell if key_focused => {
                 self.hold_value_editor(true, window, cx);
             }
-            CellMotion::NextCell | CellMotion::NextRow => {
-                let key = self
-                    .editor
-                    .as_ref()
-                    .and_then(|editor| editor.key.as_ref())
-                    .map(|input| input.read(cx).value().trim().to_string())
-                    .unwrap_or_default();
-                if !is_env_key(&key) {
-                    self.status = "Keys start with a letter or underscore.".into();
-                    self.hold_key_editor(false, window, cx);
-                    cx.notify();
+            CellMotion::NextCell => {
+                if !self.commit_new_row(window, cx) {
                     return;
                 }
-                self.commit_editor(None, false, window, cx);
                 let len = self.visible_entry_nodes().len();
                 if len > 0 {
                     self.cursor = len - 1;
@@ -2286,7 +2295,23 @@ impl EnvyApp {
                     cx.notify();
                 }
             }
+            CellMotion::NextRow => {
+                if self.commit_new_row(window, cx) {
+                    self.focus_self(window, cx);
+                }
+            }
         }
+    }
+
+    fn commit_new_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.editor_key_is_valid(cx) {
+            self.status = "Keys start with a letter or underscore.".into();
+            self.hold_key_editor(false, window, cx);
+            cx.notify();
+            return false;
+        }
+        self.commit_editor(None, false, window, cx);
+        true
     }
 
     fn place_value_caret(&self, select: bool, window: &mut Window, cx: &mut App) {
@@ -2439,16 +2464,30 @@ impl EnvyApp {
         let value_text = value.unwrap_or_default();
         let value_input = cx.new(|cx| TextInput::new("value", cx).with_text(value_text));
         if let Some(key_input) = &key_input {
-            self.edit_subs.push(
-                cx.subscribe_in(key_input, window, |this, input, event, _, cx| {
-                    if let TextInputEvent::Change = event {
+            self.edit_subs.push(cx.subscribe_in(
+                key_input,
+                window,
+                |this, input, event, window, cx| match event {
+                    TextInputEvent::Change => {
                         let query = input.read(cx).value().to_string();
                         this.refresh_editor_suggestions(&query);
                         cx.notify();
                     }
-                }),
-            );
+                    // The field binding takes Enter before the window does.
+                    TextInputEvent::Submit => {
+                        this.apply_cell_motion(CellMotion::NextRow, window, cx);
+                    }
+                    TextInputEvent::Focus | TextInputEvent::Blur => {}
+                },
+            ));
         }
+        self.edit_subs.push(
+            cx.subscribe_in(&value_input, window, |this, _, event, window, cx| {
+                if let TextInputEvent::Submit = event {
+                    this.apply_cell_motion(CellMotion::NextRow, window, cx);
+                }
+            }),
+        );
         let focus_key = key_input.is_some() && !matches!(kind, EditKind::Value);
         self.editor = Some(Editor {
             key: key_input,
@@ -2456,7 +2495,6 @@ impl EnvyApp {
             node,
             kind,
             suggestions: Vec::new(),
-            suggestion_ix: 0,
             suggestions_open: false,
         });
         if focus_key {
@@ -3461,13 +3499,25 @@ impl EnvyApp {
         }
         if self.editor.is_some()
             && matches!(self.overlay, Overlay::None)
-            && matches!(key, "tab" | "enter")
+            && (key == "tab" || is_cell_commit_key(key))
         {
-            let motion = match key {
-                "tab" if mods.shift => Some(CellMotion::PrevCell),
-                "tab" => Some(CellMotion::NextCell),
-                "enter" if !mods.shift => Some(CellMotion::NextRow),
-                _ => None,
+            let motion = if key == "tab" && mods.shift {
+                Some(CellMotion::PrevCell)
+            } else if key == "tab" {
+                Some(CellMotion::NextCell)
+            } else if is_cell_commit_key(key) && !mods.shift {
+                // Nothing in the list is chosen until a click. Enter commits.
+                match enter_while_suggesting(None) {
+                    EnterEffect::CommitAndClose => Some(CellMotion::NextRow),
+                    EnterEffect::AcceptSuggestion(index) => {
+                        self.accept_suggestion(index, window, cx);
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
+            } else {
+                None
             };
             if let Some(motion) = motion {
                 self.apply_cell_motion(motion, window, cx);
@@ -3496,12 +3546,16 @@ impl EnvyApp {
                 window.prevent_default();
                 cx.stop_propagation();
             }
-            "enter" if mods.shift && self.editor.is_none() && self.zone == Zone::Tabs => {
+            _ if is_cell_commit_key(key)
+                && mods.shift
+                && self.editor.is_none()
+                && self.zone == Zone::Tabs =>
+            {
                 self.toggle_compare_tab(self.tab_cursor, cx);
                 window.prevent_default();
                 cx.stop_propagation();
             }
-            "enter" if self.capture_enter() => {
+            _ if is_cell_commit_key(key) && self.capture_enter() => {
                 self.confirm(window, cx);
                 window.prevent_default();
                 cx.stop_propagation();
@@ -4334,7 +4388,35 @@ impl EnvyApp {
             let name = file.name.clone();
             if let FilePrompt::Rename { file_ix, input, .. } = &self.file_prompt {
                 if *file_ix == index {
-                    tabs = tabs.child(file_name_field(input, p, mono.clone()));
+                    let input = input.clone();
+                    let mut tab = h_flex()
+                        .relative()
+                        .h(px(TAB_H_PX))
+                        .px(px(TAB_PAD_X_PX))
+                        .gap(px(TAB_GAP_PX))
+                        .items_center()
+                        .rounded_t(px(6.))
+                        .font_family(mono.clone())
+                        .text_size(px(TAB_TEXT_PX))
+                        .line_height(px(TAB_LINE_PX))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(p.fg_primary)
+                        .bg(p.bg_canvas);
+                    if file.prod {
+                        tab = tab.child(
+                            div()
+                                .size(px(TAB_DOT_PX))
+                                .rounded(px(999.))
+                                .bg(p.prod_dot)
+                                .flex_shrink_0(),
+                        );
+                    }
+                    tab = tab.child(div().min_w(px(72.)).child(inline_field(
+                        &input,
+                        p,
+                        TAB_LINE_PX,
+                    )));
+                    tabs = tabs.child(tab);
                     continue;
                 }
             }
@@ -4354,15 +4436,15 @@ impl EnvyApp {
             let mut tab = h_flex()
                 .id(SharedString::from(format!("file-{index}")))
                 .relative()
-                .h(px(31.))
-                .px(px(12.))
-                .gap(px(6.))
+                .h(px(TAB_H_PX))
+                .px(px(TAB_PAD_X_PX))
+                .gap(px(TAB_GAP_PX))
                 .items_center()
                 .rounded_t(px(6.))
                 .cursor_pointer()
                 .font_family(mono.clone())
-                .text_size(px(12.5))
-                .line_height(px(16.))
+                .text_size(px(TAB_TEXT_PX))
+                .line_height(px(TAB_LINE_PX))
                 .font_weight(if is_active {
                     FontWeight::MEDIUM
                 } else {
@@ -4426,7 +4508,7 @@ impl EnvyApp {
             if file.prod {
                 tab = tab.child(
                     div()
-                        .size(px(6.))
+                        .size(px(TAB_DOT_PX))
                         .rounded(px(999.))
                         .bg(p.prod_dot)
                         .flex_shrink_0(),
@@ -5091,14 +5173,12 @@ impl EnvyApp {
                         None
                     };
 
-                    let row_h = if editing_this { px(36.) } else { KEY_ROW_H };
-
                     let mut row = h_flex()
                         .id(SharedString::from(format!("key-{node}")))
                         .group(key_group.clone())
                         .mx(px(8.))
                         .px(px(7.))
-                        .h(row_h)
+                        .h(KEY_ROW_H)
                         .flex_shrink_0()
                         .rounded(px(6.))
                         .border_1()
@@ -5166,8 +5246,8 @@ impl EnvyApp {
 
                     let mut toggle_btn = div()
                         .id(SharedString::from(format!("toggle-{node}")))
-                        .w(px(24.))
-                        .h(px(24.))
+                        .w(px(KEY_TOGGLE_W_PX))
+                        .h(px(KEY_TOGGLE_W_PX))
                         .flex_shrink_0()
                         .rounded(px(5.))
                         .border_1()
@@ -5210,120 +5290,109 @@ impl EnvyApp {
                     }
 
                     let key_edit = entity.clone();
-                    let key_cell = if show_rename_input {
-                        if let Some(key_input) = self.editor.as_ref().and_then(|e| e.key.as_ref()) {
-                            div()
-                                .w(key_w)
-                                .flex_shrink_0()
-                                .pr(px(12.))
-                                .font_family(mono.clone())
-                                .child(cell_field(key_input))
-                                .into_any_element()
-                        } else {
-                            div().w(key_w).flex_shrink_0().into_any_element()
-                        }
-                    } else {
-                        let mut key_line = h_flex()
-                            .min_w(px(0.))
-                            .items_center()
-                            .font_family(mono.clone())
-                            .text_size(px(13.))
-                            .line_height(px(18.));
-                        if exported {
-                            key_line = key_line.child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_color(p.fg_tertiary)
-                                    .child("export "),
-                            );
-                        }
+                    let mut key_line = h_flex()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .items_center()
+                        .font_family(mono.clone())
+                        .text_size(px(KEY_TEXT_PX))
+                        .line_height(px(KEY_LINE_PX))
+                        .text_color(key_color);
+                    if exported {
                         key_line = key_line.child(
                             div()
+                                .flex_shrink_0()
+                                .text_color(p.fg_tertiary)
+                                .child("export "),
+                        );
+                    }
+                    if show_rename_input {
+                        if let Some(key_input) = self.editor.as_ref().and_then(|e| e.key.as_ref()) {
+                            key_line =
+                                key_line.child(div().flex_1().min_w(px(0.)).child(inline_field(
+                                    key_input,
+                                    p,
+                                    KEY_LINE_PX,
+                                )));
+                        }
+                    } else {
+                        key_line = key_line.child(
+                            div()
+                                .id(SharedString::from(format!("key-text-{node}")))
                                 .flex_1()
                                 .min_w(px(0.))
                                 .truncate()
-                                .text_color(key_color)
+                                .cursor_text()
+                                .tooltip(hover_tip(full_key_tip))
+                                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    key_edit.update(cx, |this, cx| {
+                                        this.edit_entry_at(row_ix, RowTarget::KeyName, window, cx);
+                                    });
+                                })
                                 .child(key.clone()),
                         );
+                    }
+                    let mut key_cell = h_flex()
+                        .id(SharedString::from(format!("key-name-{node}")))
+                        .w(key_w)
+                        .flex_shrink_0()
+                        .pr(px(KEY_CELL_PAD_RIGHT_PX))
+                        .min_w(px(0.))
+                        .gap(px(KEY_CELL_GAP_PX))
+                        .items_center();
+                    if related {
+                        key_cell = key_cell.pl(px(KEY_RELATED_PAD_PX)).child(
+                            Icon::new(IconName::CornerDownRight)
+                                .size(px(KEY_RELATED_ICON_PX))
+                                .text_color(p.fg_tertiary.opacity(0.65)),
+                        );
+                    }
+                    let key_cell = key_cell
+                        .child(toggle_btn)
+                        .child(key_line)
+                        .into_any_element();
 
-                        let text_col = v_flex()
-                            .id(SharedString::from(format!("key-text-{node}")))
-                            .flex_1()
-                            .min_w(px(0.))
-                            .cursor_text()
-                            .tooltip(hover_tip(full_key_tip))
-                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                                cx.stop_propagation();
-                                key_edit.update(cx, |this, cx| {
-                                    this.edit_entry_at(row_ix, RowTarget::KeyName, window, cx);
-                                });
-                            })
-                            .child(key_line);
-
-                        let mut cell = h_flex()
-                            .id(SharedString::from(format!("key-name-{node}")))
-                            .w(key_w)
-                            .flex_shrink_0()
-                            .pr(px(14.))
-                            .min_w(px(0.))
-                            .gap(px(6.))
-                            .items_center();
-                        if related {
-                            cell = cell.pl(px(10.)).child(
-                                Icon::new(IconName::CornerDownRight)
-                                    .size(px(11.))
-                                    .text_color(p.fg_tertiary.opacity(0.65)),
-                            );
-                        }
-                        cell.child(toggle_btn).child(text_col).into_any_element()
-                    };
-
-                    let value_cell = if show_value_input {
-                        if let Some(editor) = &self.editor {
-                            div()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .pr(px(8.))
-                                .font_family(mono.clone())
-                                .child(cell_field(&editor.value))
-                                .into_any_element()
+                    let shown = display_value(&value, visible);
+                    let dim_empty = value.is_empty();
+                    let value_color = if disabled {
+                        if dim_empty {
+                            p.fg_tertiary.opacity(0.55)
+                        } else if visible {
+                            p.fg_tertiary
                         } else {
-                            div().flex_1().into_any_element()
+                            p.fg_tertiary.opacity(0.75)
+                        }
+                    } else if dim_empty {
+                        p.fg_tertiary
+                    } else if visible {
+                        p.fg_primary
+                    } else {
+                        p.fg_secondary
+                    };
+                    let value_tip = if visible && !dim_empty && !show_value_input {
+                        value.clone()
+                    } else {
+                        String::new()
+                    };
+                    let value_edit = entity.clone();
+                    let mut value_cell = div()
+                        .id(SharedString::from(format!("key-value-{node}")))
+                        .flex_1()
+                        .min_w(px(0.))
+                        .pr(px(VALUE_PAD_RIGHT_PX))
+                        .font_family(mono.clone())
+                        .text_size(px(KEY_TEXT_PX))
+                        .line_height(px(KEY_LINE_PX))
+                        .text_color(value_color);
+                    if show_value_input {
+                        if let Some(editor) = &self.editor {
+                            value_cell =
+                                value_cell.child(inline_field(&editor.value, p, KEY_LINE_PX));
                         }
                     } else {
-                        let shown = display_value(&value, visible);
-                        let dim_empty = value.is_empty();
-                        let value_color = if disabled {
-                            if dim_empty {
-                                p.fg_tertiary.opacity(0.55)
-                            } else if visible {
-                                p.fg_tertiary
-                            } else {
-                                p.fg_tertiary.opacity(0.75)
-                            }
-                        } else if dim_empty {
-                            p.fg_tertiary
-                        } else if visible {
-                            p.fg_primary
-                        } else {
-                            p.fg_secondary
-                        };
-                        let value_tip = if visible && !dim_empty {
-                            value.clone()
-                        } else {
-                            String::new()
-                        };
-                        let value_edit = entity.clone();
-                        div()
-                            .id(SharedString::from(format!("key-value-{node}")))
-                            .flex_1()
-                            .min_w(px(0.))
-                            .pr(px(8.))
-                            .font_family(mono.clone())
-                            .text_size(px(13.))
-                            .line_height(px(18.))
+                        value_cell = value_cell
                             .truncate()
-                            .text_color(value_color)
                             .cursor_text()
                             .when(!value_tip.is_empty(), |cell| {
                                 cell.tooltip(hover_tip(value_tip))
@@ -5334,9 +5403,9 @@ impl EnvyApp {
                                     this.edit_entry_at(row_ix, RowTarget::Value, window, cx);
                                 });
                             })
-                            .child(shown)
-                            .into_any_element()
-                    };
+                            .child(shown);
+                    }
+                    let value_cell = value_cell.into_any_element();
 
                     let mut actions = h_flex()
                         .w(KEY_ACTIONS_W)
@@ -5409,32 +5478,45 @@ impl EnvyApp {
                 let mut row = h_flex()
                     .mx(px(8.))
                     .mt(px(4.))
-                    .px(px(8.))
-                    .h(px(36.))
+                    .px(px(7.))
+                    .h(KEY_ROW_H)
                     .flex_shrink_0()
                     .rounded(px(6.))
+                    .border_1()
+                    .border_color(p.bg_canvas.opacity(0.))
                     .items_center()
                     .bg(p.bg_selected_accent);
                 if let Some(key_input) = &editor.key {
                     row = row.child(
-                        div()
+                        h_flex()
                             .w(key_w)
-                            .h(px(26.))
                             .flex_shrink_0()
-                            .pr(px(12.))
+                            .pr(px(KEY_CELL_PAD_RIGHT_PX))
+                            .gap(px(KEY_CELL_GAP_PX))
+                            .items_center()
                             .font_family(mono.clone())
-                            .child(cell_field(key_input)),
+                            .text_size(px(KEY_TEXT_PX))
+                            .line_height(px(KEY_LINE_PX))
+                            .text_color(p.fg_primary)
+                            .child(div().w(px(KEY_TOGGLE_W_PX)).flex_shrink_0())
+                            .child(div().flex_1().min_w(px(0.)).child(inline_field(
+                                key_input,
+                                p,
+                                KEY_LINE_PX,
+                            ))),
                     );
                 }
                 row = row
                     .child(
                         div()
                             .flex_1()
-                            .h(px(26.))
                             .min_w(px(0.))
-                            .pr(px(8.))
+                            .pr(px(VALUE_PAD_RIGHT_PX))
                             .font_family(mono.clone())
-                            .child(cell_field(&editor.value)),
+                            .text_size(px(KEY_TEXT_PX))
+                            .line_height(px(KEY_LINE_PX))
+                            .text_color(p.fg_primary)
+                            .child(inline_field(&editor.value, p, KEY_LINE_PX)),
                     )
                     .child(
                         div()
@@ -5567,17 +5649,11 @@ impl EnvyApp {
             .map(|input| input.read(cx).value().to_string())
             .unwrap_or_default();
         let entity = cx.entity();
-        let active_ix = editor.suggestion_ix;
 
         let mut rows = v_flex().p(px(3.)).gap(px(1.));
         for (ix, suggestion) in editor.suggestions.iter().enumerate() {
-            let selected = ix == active_ix;
             let pick_entity = entity.clone();
-            let rest_color = if selected {
-                p.fg_secondary
-            } else {
-                p.fg_tertiary
-            };
+            let rest_color = p.fg_tertiary;
 
             let key_label = if let Some((start, end)) = match_span(&suggestion.key, &query) {
                 let before = suggestion.key[..start].to_string();
@@ -5618,16 +5694,12 @@ impl EnvyApp {
                     .text_size(px(12.))
                     .line_height(px(16.))
                     .truncate()
-                    .text_color(if selected {
-                        p.fg_primary
-                    } else {
-                        p.fg_secondary
-                    })
+                    .text_color(p.fg_secondary)
                     .child(suggestion.key.clone())
                     .into_any_element()
             };
 
-            let mut item = h_flex()
+            let item = h_flex()
                 .id(SharedString::from(format!("key-suggest-{ix}")))
                 .h(px(24.))
                 .px(px(8.))
@@ -5640,12 +5712,8 @@ impl EnvyApp {
                         this.accept_suggestion(ix, window, cx);
                     });
                 })
-                .child(key_label);
-            if selected {
-                item = item.bg(p.bg_selected_muted);
-            } else {
-                item = item.hover(move |style| style.bg(p.bg_hover));
-            }
+                .child(key_label)
+                .hover(move |style| style.bg(p.bg_hover));
             rows = rows.child(item);
         }
 
@@ -5867,7 +5935,7 @@ impl EnvyApp {
             &[
                 ("Tab", "Next cell"),
                 ("Shift+Tab", "Previous cell"),
-                ("Enter", "Next row"),
+                ("Enter", "Done"),
                 ("Esc", "Cancel"),
             ]
         } else if self.editor_view == EditorView::Text {
@@ -7142,7 +7210,7 @@ impl EnvyApp {
 
 const SHORTCUTS: &[(&str, &str)] = &[
     ("↑  ↓", "Move. In a field, start or end"),
-    ("Enter", "Next row, or open the project"),
+    ("Enter", "Close the cell, or open the project"),
     ("Tab", "Key, value, then the next key"),
     ("Shift+Tab", "Previous cell, or the previous area"),
     ("←", "Back to the project list"),
@@ -7556,22 +7624,39 @@ fn sidebar_section(label: &'static str, divider: bool, p: Palette) -> gpui_kit::
 
 fn file_name_field(input: &Entity<TextInput>, p: Palette, mono: SharedString) -> gpui_kit::Div {
     div()
-        .w(px(168.))
-        .h(px(28.))
+        .h(px(TAB_H_PX))
+        .px(px(TAB_PAD_X_PX))
+        .min_w(px(96.))
         .mb(px(4.))
-        .px(px(8.))
         .flex_shrink_0()
         .font_family(mono)
-        .rounded(px(6.))
-        .border_1()
-        .border_color(p.accent_ring)
-        .bg(p.bg_surface)
+        .text_size(px(TAB_TEXT_PX))
+        .line_height(px(TAB_LINE_PX))
+        .text_color(p.fg_primary)
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(input.clone())
+        .child(inline_field(input, p, TAB_LINE_PX))
 }
 
-fn cell_field(input: &Entity<TextInput>) -> gpui_kit::Div {
-    div().h(px(26.)).w_full().min_w(px(0.)).child(input.clone())
+/// The field sits on the label's line. The ring is drawn outside that line.
+fn inline_field(input: &Entity<TextInput>, p: Palette, line: f32) -> gpui_kit::Div {
+    div()
+        .relative()
+        .w_full()
+        .h(px(line))
+        .min_w(px(0.))
+        .child(
+            div()
+                .absolute()
+                .top(px(-4.))
+                .bottom(px(-4.))
+                .left(px(-4.))
+                .right(px(-2.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(p.accent_ring)
+                .bg(p.bg_canvas.opacity(0.35)),
+        )
+        .child(input.clone())
 }
 
 fn lined_field(input: &Entity<TextInput>, p: Palette) -> gpui_kit::Div {

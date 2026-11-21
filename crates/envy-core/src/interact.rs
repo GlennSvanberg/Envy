@@ -39,7 +39,7 @@ pub enum CellMotion {
     NextCell,
     /// Shift+Tab. Value then key, then the previous row's value.
     PrevCell,
-    /// Enter. Same column, next row.
+    /// Enter. Commit and close. The row stays selected.
     NextRow,
     /// Esc. Does not write.
     Cancel,
@@ -47,8 +47,8 @@ pub enum CellMotion {
 
 /// Where focus goes after a cell motion.
 ///
-/// `focus_row` is `None` only for cancel. Every other motion keeps a field
-/// open, staying on the current cell when there is no neighbor.
+/// `focus_cell` is `None` when the editor closes. Cancel also clears the row.
+/// Tab keeps a field open, staying on the current cell when there is no neighbor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CellRoute {
     pub commit: bool,
@@ -83,12 +83,12 @@ pub fn route_cell_edit(row: usize, len: usize, cell: EditCell, motion: CellMotio
                 (row, EditCell::Key)
             }
         }
-        (CellMotion::NextRow, cell) => {
-            if row + 1 < len {
-                (row + 1, cell)
-            } else {
-                (row, cell)
-            }
+        (CellMotion::NextRow, _) => {
+            return CellRoute {
+                commit: true,
+                focus_row: Some(row),
+                focus_cell: None,
+            };
         }
     };
     CellRoute {
@@ -96,6 +96,33 @@ pub fn route_cell_edit(row: usize, len: usize, cell: EditCell, motion: CellMotio
         focus_row: Some(next_row),
         focus_cell: Some(next_cell),
     }
+}
+
+/// What Enter does while a key list is open.
+///
+/// A click chooses a suggestion. An open list with nothing chosen does not
+/// take Enter; Enter commits the typed text and closes the field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnterEffect {
+    CommitAndClose,
+    AcceptSuggestion(usize),
+}
+
+pub fn enter_while_suggesting(chosen: Option<usize>) -> EnterEffect {
+    match chosen {
+        Some(index) => EnterEffect::AcceptSuggestion(index),
+        None => EnterEffect::CommitAndClose,
+    }
+}
+
+/// Windows names both Return keys `"enter"`.
+///
+/// GPUI's Windows mapper (`parse_immutable`) sends `VK_RETURN` (0x0D) as
+/// `"enter"`. That virtual key is the main Return key and the numpad Enter;
+/// the extended-key bit is not part of the name. `"kp_enter"` is accepted for
+/// platforms that label the numpad key on its own.
+pub fn is_cell_commit_key(key: &str) -> bool {
+    matches!(key, "enter" | "kp_enter" | "numpadenter")
 }
 
 /// What the user did while a value field was open.
@@ -209,24 +236,40 @@ mod tests {
     }
 
     #[test]
-    fn enter_stays_in_the_same_column_and_esc_drops_the_field() {
-        let next = route_cell_edit(0, 3, EditCell::Value, CellMotion::NextRow);
-        assert!(next.commit);
-        assert_eq!(next.focus_row, Some(1));
-        assert_eq!(next.focus_cell, Some(EditCell::Value));
+    fn enter_and_numpad_enter_commit_and_close() {
+        for key in ["enter", "kp_enter", "numpadenter"] {
+            assert!(is_cell_commit_key(key), "{key}");
+        }
+        assert!(!is_cell_commit_key("tab"));
+        assert!(!is_cell_commit_key("return"));
 
-        let key_next = route_cell_edit(1, 3, EditCell::Key, CellMotion::NextRow);
-        assert_eq!(key_next.focus_row, Some(2));
-        assert_eq!(key_next.focus_cell, Some(EditCell::Key));
+        let key = route_cell_edit(0, 3, EditCell::Key, CellMotion::NextRow);
+        assert!(key.commit);
+        assert_eq!(key.focus_row, Some(0));
+        assert_eq!(key.focus_cell, None);
 
-        let stay = route_cell_edit(2, 3, EditCell::Key, CellMotion::NextRow);
-        assert_eq!(stay.focus_row, Some(2));
-        assert_eq!(stay.focus_cell, Some(EditCell::Key));
+        let value = route_cell_edit(1, 3, EditCell::Value, CellMotion::NextRow);
+        assert!(value.commit);
+        assert_eq!(value.focus_row, Some(1));
+        assert_eq!(value.focus_cell, None);
+
+        let last = route_cell_edit(2, 3, EditCell::Key, CellMotion::NextRow);
+        assert_eq!(last.focus_row, Some(2));
+        assert_eq!(last.focus_cell, None);
 
         let cancel = route_cell_edit(1, 3, EditCell::Value, CellMotion::Cancel);
         assert!(!cancel.commit);
         assert_eq!(cancel.focus_row, None);
         assert_eq!(cancel.focus_cell, None);
+    }
+
+    #[test]
+    fn an_open_list_does_not_take_enter_until_a_suggestion_is_chosen() {
+        assert_eq!(enter_while_suggesting(None), EnterEffect::CommitAndClose);
+        assert_eq!(
+            enter_while_suggesting(Some(2)),
+            EnterEffect::AcceptSuggestion(2)
+        );
     }
 
     #[test]
