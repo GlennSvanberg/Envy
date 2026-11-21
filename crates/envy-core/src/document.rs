@@ -274,6 +274,30 @@ impl EnvDocument {
         out
     }
 
+    /// Enabled assignments as `KEY=value` lines, in file order.
+    ///
+    /// Comments, blank lines, disabled entries, and an `export` prefix are
+    /// left out. Values that contain spaces or other special characters are
+    /// double-quoted so the block can be pasted into an env import.
+    pub fn export_enabled(&self) -> String {
+        let mut out = String::new();
+        for (_, entry) in self.entries() {
+            if entry.disabled {
+                continue;
+            }
+            out.push_str(&entry.key);
+            out.push('=');
+            let style = if needs_quotes(&entry.value) {
+                QuoteStyle::Double
+            } else {
+                QuoteStyle::Bare
+            };
+            out.push_str(&encode_value(&entry.value, style));
+            out.push('\n');
+        }
+        out
+    }
+
     pub fn entries(&self) -> impl Iterator<Item = (usize, &Entry)> {
         self.nodes
             .iter()
@@ -1313,6 +1337,25 @@ KEY_EQ = value\n\
         let sample = "A=1\nB=2";
         let doc = EnvDocument::parse(sample);
         assert_eq!(doc.serialize(), sample);
+    }
+
+    #[test]
+    fn export_enabled_is_key_equals_value_without_comments_or_disabled() {
+        let doc = EnvDocument::parse(
+            "# keep me out\n\
+             export HOST=localhost\n\
+             # disabled below\n\
+             # PORT=1\n\
+             NAME=\"Ada Lovelace\"\n\
+             EMPTY=\n\
+             TOKEN=plain\n",
+        );
+        assert_eq!(
+            doc.export_enabled(),
+            "HOST=localhost\nNAME=\"Ada Lovelace\"\nEMPTY=\nTOKEN=plain\n"
+        );
+        let empty = EnvDocument::parse("# only a comment\n# GONE=1\n");
+        assert_eq!(empty.export_enabled(), "");
     }
 
     #[test]

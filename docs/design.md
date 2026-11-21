@@ -85,7 +85,7 @@ Two font families only:
 | `row.primary` | UI Sans | `13 px` | `18 px` | Medium (500) / Regular (400) | Project names, modal body copy |
 | `code.row` | Monospace | `13 px` | `18 px` | Regular (400) / Medium (500) | Env keys, values, file tabs, diff values |
 | `ui.compact` | UI Sans | `12 px` | `16 px` | Regular (400) / Medium (500) | Search inputs, buttons, status pills, settings labels |
-| `micro` | UI Sans / Mono | `11 px` | `14 px` | Medium (500) / Regular (400) | Column headers, git branch subline, footer path, keycaps |
+| `micro` | UI Sans / Mono | `11 px` | `14 px` | Medium (500) / Regular (400) | Column headers, project paths, footer path, keycaps |
 
 **Clipping invariant:** Never assign a fixed box height smaller than the text element's `line_height`. Two-line rows always size their parent height to accommodate both line heights plus inter-line gap and vertical breathing room.
 
@@ -109,12 +109,12 @@ Two font families only:
 | Title bar | `36 px` height | Matches tab bar and sidebar header; flat `bg.chrome`, brand left + active project/branch breadcrumb |
 | Sidebar width | `256 px` fixed | Separated from main pane by 1 px `border.hairline` |
 | Sidebar header | `36 px` height | Title + file/project count or scan indicator + Add folder / Refresh |
-| Sidebar row | `40 px` (with branch) / `32 px` (no branch) | 18 px name + 2 px gap + 14 px branch = 34 px inside 40 px; compact 32 px when branch is hidden |
+| Sidebar row | `40 px` | 18 px name + 14 px path. Sidebar width `200–480 px`, default `256 px` |
 | File tab bar | `36 px` height | Full-width strip above toolbar |
 | Workspace toolbar | `40 px` height | Search/summary left, grouped icon buttons right |
 | Column header strip | `28 px` height | Edge-to-edge strip matching exact column widths of rows below |
 | Section divider row | `28 px` height | Discreet group label (`11 px`, `fg.tertiary`) + `1 px` `border.hairline` rule |
-| Key row | `32 px` / `44 px` (with description) | Mono key (`276 px` incl. `20 px` on/off toggle) & value (`flex_1`); description subline `11 px / 14 px` |
+| Key row | `32 px` | Mono key (fits the longest name, `160–560 px`) and value (`flex_1`). A comment on the key is a tooltip only |
 | Compare row | `32 px` fixed height | Single-line, edge-to-edge 4-column aligned grid (`256 px` key, `56 px` centered copy gutter) |
 | Footer / Status bar | `28 px` height | Short project-relative path or status left, keycap hints right |
 | Toolbar icon button | `28 × 28 px` | `15 px` Lucide icon, `6 px` radius |
@@ -135,12 +135,14 @@ Two font families only:
 - **Header (`36 px`):** Left shows `PROJECTS` (`11 px`, medium, `fg.tertiary`) plus either a subtle scanning spinner + live file count (`12 files`) while scanning, or the project count when idle. Right has two `28 × 28 px` ghost icon buttons: `Refresh` (`RefreshCw`, tooltip `"Rescan folders · Ctrl+R"`) and `Add folder` (`FolderPlus`, tooltip `"Add folder · Ctrl+O"`).
 - **Search field:** `8 px` horizontal padding, `8 px` bottom padding. `Input` (`28 px`, `Search` icon prefix, `cleanable(true)`, placeholder `"Find a project"`). Hidden when no folders have been added.
 - **Project list:** Edge-to-edge scrollable container (`project_scroll`) with no outer box border.
-- **Project row (`40 px` with branch / `32 px` without branch, `mx(8 px)`, `px(8 px)`, `rounded(6 px)`):**
-  - Left: `6 px` status dot — amber (`status.warning_dot`) if any file in the project is missing keys vs `.env.example`, otherwise transparent spacer so all project names align cleanly on the same vertical axis.
+- **Width:** `256 px` until the user drags the handle on the sidebar's right edge (`200–480 px`). The width is remembered. The handle is a `1 px` hairline in a `7 px` hit area; the pointer is `col-resize`, and the line takes the accent color while hovered.
+- **Sections:** `FAVORITES` then `ALL PROJECTS`, each a `11 px` medium `fg.tertiary` label. A hairline sits above All projects when Favorites is also shown. An empty section is omitted, including while the list is filtered. Favorites keep pin order. All projects are recent, then name.
+- **Project row (`40 px`, `mx(8 px)`, `px(8 px)`, `rounded(6 px)`):**
   - Center (`flex_1`, `min_w(0)`):
     - Line 1: Project name (`13 px / 18 px`, `truncate()`, `fg.primary` with `FontWeight::MEDIUM` when selected). Focused selection uses quiet `bg.selected_accent` fill + `1 px` `accent.ring` hairline border on the row itself; unfocused selection uses neutral `bg.selected_muted` with no border.
-    - Line 2 (conditional): Rendered **only** when `branch` is a known git branch (never shown for `""`, `"unknown"`, `"—"`, `"-"` or `"…"`). Displays a `12 px` `GitBranch` icon + branch name (`11 px / 14 px`, `fg.tertiary`, `truncate()`).
+    - Line 2: The project path (`11 px / 14 px`, `fg.tertiary`). Windows shows a drive letter and backslashes, without a `\\?\` prefix. Elsewhere the path uses slashes and shortens the home directory to `~`. When the path does not fit the sidebar, characters drop from the start (`…\glenn\braian`) and the full native path is the hover tooltip.
   - Right: `24 × 24 px` Pin/Star icon button (`StarFill` in `accent` when pinned; `Star` in `fg.tertiary` visible only on row hover when unpinned).
+  - The search field matches the project name and the path. The branch is not shown on the row. Missing keys vs `.env.example` are not marked here.
 
 ### 5.2 File Tab Bar (`Tabs` Zone)
 - Height `36 px`, background `bg.chrome`, `border_b_1` (`border.hairline`), horizontal scroll if many files.
@@ -169,7 +171,8 @@ Two font families only:
     - Cycle second file icon button (`ArrowLeftRight`, tooltip `"Compare another file · ]"`), shown when project has ≥ 3 files.
 - **Right region (`gap(4 px)` within groups, `1 px × 16 px` `border.hairline` dividers with `mx(4 px)` between groups):**
   - *Edit group:*
-    - `Plus` — New key (`N`)
+    - `Copy` — Copy all enabled keys as `KEY=value` lines
+    - `Plus` — New file in the current project (asks for a name, default `.env.local`)
     - `Undo2` — Undo (`Ctrl+Z`), disabled state when `!can_undo`
     - `Redo2` — Redo (`Ctrl+Y`), disabled state when `!can_redo`
     - `Save` — Save (`Ctrl+S`), accented fill (`accent.subtle`, `1 px accent.ring`, icon in `accent`) when dirty; disabled when clean
@@ -186,12 +189,12 @@ Two font families only:
 - Edge-to-edge scrollable table with no outer frame border, flowing cleanly across the canvas like Zed panels.
 - **External disk change banner (conditional):** Compact `36 px` row with `status.danger_bg` fill, `border_b_1` (`status.danger_border`), `TriangleAlert` icon, concise copy `"This file changed on disk."`, and two inline compact buttons: `Reload` (`R`) and `Keep mine` (`Esc`).
 - **Column header (`28 px`, `px(16 px)`, `border_b_1`, `bg.chrome` @ 55%):**
-  - `KEY` — `w(276 px)`, `flex_shrink_0`, `pl(30 px)`, `pr(16 px)`
+  - `KEY` — width fits the longest key in the open file (`160–560 px`, about `8.2 px` per character plus the toggle). Dragging the divider on the header's right edge sets a width that is remembered and used for every file. The pointer is `col-resize`.
   - `VALUE` — `flex_1`, `min_w(0)`
   - Actions spacer — `w(64 px)`, `flex_shrink_0`
-- **Key rows (`32 px` single-line, `44 px` with description, `mx(8 px)`, `px(7 px)` + `1 px` border = `16 px` inner edge, `rounded(6 px)`):**
+- **Key rows (`32 px`, `mx(8 px)`, `px(7 px)` + `1 px` border = `16 px` inner edge, `rounded(6 px)`):**
   - Subtle hover (`bg.hover`), selected unfocused (`bg.selected_muted`, no border), selected focused (`bg.selected_accent` + `1 px accent.ring`, `fg.primary` text).
-  - **Key column (`w(276 px)`):** Leading `24 × 24 px` on/off toggle button (`ToggleRight` in `accent` for active entries, `ToggleLeft` in `fg.secondary` for commented-out/disabled entries; distinct `accent.subtle` + `accent.ring` hover state; tooltip `"Turn off · Ctrl+/"` / `"Turn on · Ctrl+/"`). Always visible on disabled rows; shown on active rows only when hovered or selected+focused to keep the table calm. When both an active and disabled line exist for the same key, the disabled row sits directly beneath the active row with a `10 px` indent and `11 px` `CornerDownRight` indicator (never merged). Key name in mono (`13 px / 18 px`, `fg.primary`, or `fg.tertiary` when disabled), optional `export ` prefix in `fg.tertiary`, and optional description comment subline (`11 px / 14 px`, `fg.tertiary`, full multi-line text in tooltip).
+  - **Key column:** Leading `24 × 24 px` on/off toggle button (`ToggleRight` in `accent` for active entries, `ToggleLeft` in `fg.secondary` for commented-out/disabled entries; distinct `accent.subtle` + `accent.ring` hover state; tooltip `"Turn off · Ctrl+Space"` / `"Turn on · Ctrl+Space"`). Always visible on disabled rows; shown on active rows only when hovered or selected+focused to keep the table calm. When both an active and disabled line exist for the same key, the disabled row sits directly beneath the active row with a `10 px` indent and `11 px` `CornerDownRight` indicator (never merged). Key name in mono (`13 px / 18 px`, `fg.primary`, or `fg.tertiary` when disabled), optional `export ` prefix in `fg.tertiary`. The name is truncated only when the column cannot grow any further; the hover tooltip is the full key, and a comment directly above the key is included there and nowhere else on the row. Clicking the key name renames it. Clicking the value reveals it for editing and masks it again when the field closes.
   - **Section dividers (`28 px`):** Standalone comments and decorated section headers (`# --- Database ---`) render as discreet non-selectable dividers (`11 px` `fg.tertiary` label + `1 px` `border.hairline`) in file order.
   - **Value column:** `flex_1`, `min_w(0)`, `mono`, `13 px / 18 px`, `truncate()`, dimmed when the row is disabled.
     - Masked: capped at **12 dots** (`•` repeated `len.min(12)`), rendered in `fg.secondary` so rows stay calm and never overflow or leak exact long secret lengths.
@@ -199,7 +202,8 @@ Two font families only:
     - Empty: `"empty"` in `fg.tertiary`.
   - **Actions column (`w(64 px)`, `flex_shrink_0`, `justify_end`, `gap(4 px)`):** `Copy` (`Copy`) and `Reveal/Hide` (`Eye` / `EyeOff`) `24 × 24 px` icon buttons. Visible when the row is selected (focused) or hovered.
   - **Tail action:** A quiet `+ Add key` ghost row (`32 px`, `fg.tertiary`) sits below the last key so the table finishes cleanly above open canvas space.
-  - **Inline editing (`Value`, `Rename`, `New`) & key-name autocomplete:** Renders inside the exact same `276 px` / `flex_1` / `64 px` column geometry with a monospace `Input` and no outer double-border. Once at least 1 character is typed into a new or renamed key name, a quiet compact list (max 5 keys, matching the key input width, no source badges or footer bar, lightly emphasizing the matched text) appears directly below ranked internally by sibling env files missing from this file, other discovered projects, then common env key names. Navigable with `↑`/`↓`/`Tab`/`Enter`/`Esc` or mouse click; picking a key never prefills or hints values.
+  - **Inline editing (`Value`, `Rename`, `New`) & key-name autocomplete:** Renders inside the key column, the flexible value column, and the `64 px` actions column with a monospace `Input` and no outer double-border. Once at least 1 character is typed into a new or renamed key name, a quiet compact list (max 5 keys, matching the key input width, no source badges or footer bar, lightly emphasizing the matched text) appears directly below ranked internally by sibling env files missing from this file, other discovered projects, then common env key names. Navigable with `↑`/`↓`/`Tab`/`Enter`/`Esc` or mouse click; picking a key never prefills or hints values.
+  - **File name:** `+` in the toolbar asks for a new env file name in the tab bar (default `.env.local`). Double-clicking a tab renames that file in place. Enter confirms, Esc cancels, and a name that is taken or not an env file is explained on the line under the field.
 
 ### 5.4b Plain Text Editor View
 - Toggled via the toolbar `FileCode` / `List` icon button or `Ctrl+E`. Choice is persisted in config (`editor_view = "table" | "text"`).

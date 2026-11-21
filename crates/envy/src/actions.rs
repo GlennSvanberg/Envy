@@ -61,7 +61,7 @@ pub fn bind(cx: &mut gpui_kit::App) {
         KeyBinding::new("c", CopyValue, list),
         KeyBinding::new("space", ToggleReveal, list),
         KeyBinding::new("a", RevealAll, list),
-        KeyBinding::new("ctrl-/", ToggleComment, list),
+        KeyBinding::new("ctrl-space", ToggleComment, list),
         KeyBinding::new("n", NewKey, list),
         KeyBinding::new("f2", RenameKey, list),
         KeyBinding::new("x", DeleteKey, list),

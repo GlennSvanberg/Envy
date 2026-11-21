@@ -41,6 +41,13 @@ pub struct Settings {
     /// Last chosen view mode for editing files (`table` or `text`).
     #[serde(default)]
     pub editor_view: EditorView,
+    /// Sidebar width in pixels. Absent until the user drags the divider.
+    #[serde(default)]
+    pub sidebar_width: Option<u32>,
+    /// Key column width in pixels. Absent until the user drags the divider;
+    /// until then the column fits the longest key in the open file.
+    #[serde(default)]
+    pub key_column_width: Option<u32>,
 }
 
 fn default_clear_clipboard() -> bool {
@@ -58,6 +65,8 @@ impl Default for Settings {
             clear_clipboard: true,
             global_hotkey: default_hotkey(),
             editor_view: EditorView::Table,
+            sidebar_width: None,
+            key_column_width: None,
         }
     }
 }
@@ -177,6 +186,8 @@ mod tests {
         config.settings.theme = ThemeSetting::Dark;
         config.settings.clear_clipboard = false;
         config.settings.editor_view = EditorView::Text;
+        config.settings.sidebar_width = Some(320);
+        config.settings.key_column_width = Some(240);
         config
             .projects
             .insert("billing".into(), PathBuf::from("/work/billing"));
@@ -194,6 +205,8 @@ mod tests {
         assert!(text.contains("clear_clipboard = false"));
         assert!(text.contains("theme = \"dark\""));
         assert!(text.contains("editor_view = \"text\""));
+        assert!(text.contains("sidebar_width = 320"));
+        assert!(text.contains("key_column_width = 240"));
         assert!(!text.contains("value"));
         assert!(!text.contains("SECRET"));
         let loaded = Config::load_from(&path);

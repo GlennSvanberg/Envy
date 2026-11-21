@@ -7,7 +7,7 @@ use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use envy_core::discover::{
     default_file_index, is_example_filename, is_prod_filename, resolve_file, resolve_project,
@@ -15,10 +15,13 @@ use envy_core::discover::{
 use envy_core::document::{LayoutItem, Node, UnreadableLine};
 use envy_core::paste::{PasteChange, PastePlan};
 use envy_core::{
-    attach_git_identity, cache_from_projects, diff, fill_key_index, from_example, is_env_key,
-    load_index_cache, match_span, plan_paste, projects_from_cache, save_index_cache, save_text,
-    scan_paths, sidebar_rank, suggest_keys, upsert_file, Config, Deeplink, EditorView, EnvDocument,
-    EnvFile, FoundEnv, KeySuggestion, OpenFile, Project, ScanError, ThemeSetting,
+    abbreviate_home, attach_git_identity, cache_from_projects, check_env_filename,
+    clamp_key_column_px, clamp_sidebar_px, diff, fill_key_index, fitted_key_column_px,
+    from_example, host_path_style, is_env_key, load_index_cache, match_span, native_project_path,
+    plan_paste, projects_from_cache, rename_env_file, row_click, save_index_cache, save_text,
+    scan_paths, sidebar_path_chars, sidebar_rank, suggest_keys, truncate_path_head, upsert_file,
+    Config, Deeplink, EditorView, EnvDocument, EnvFile, EnvFileNameError, FoundEnv, KeySuggestion,
+    OpenFile, PathStyle, Project, RowClick, RowTarget, ScanError, ThemeSetting,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -43,9 +46,8 @@ use crate::hotkey_os;
 use crate::instance::Instance;
 use crate::theme::{
     self, Palette, COL_HEADER_H, DIFF_GUTTER_W, DIFF_HEADER_H, DIFF_KEY_COL_W, DIFF_ROW_H,
-    FOOTER_H, KEY_ACTIONS_W, KEY_COL_W, KEY_ROW_DESC_H, KEY_ROW_H, MASK_MAX_DOTS, SECTION_ROW_H,
-    SIDEBAR_HEADER_H, SIDEBAR_ROW_BRANCH_H, SIDEBAR_ROW_COMPACT_H, SIDEBAR_W, TAB_BAR_H,
-    TITLE_BAR_H, TOOLBAR_H,
+    FOOTER_H, KEY_ACTIONS_W, KEY_ROW_H, MASK_MAX_DOTS, SECTION_ROW_H, SIDEBAR_HEADER_H,
+    SIDEBAR_ROW_BRANCH_H, SIDEBAR_W, TAB_BAR_H, TITLE_BAR_H, TOOLBAR_H,
 };
 
 const CLEAR_AFTER: Duration = Duration::from_secs(30);
@@ -86,6 +88,31 @@ enum Overlay {
     Paste(PastePlan),
     Shortcuts,
     Unreadable,
+}
+
+enum FilePrompt {
+    None,
+    Create {
+        input: Entity<InputState>,
+        error: Option<String>,
+    },
+    Rename {
+        file_ix: usize,
+        input: Entity<InputState>,
+        error: Option<String>,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum ResizeKind {
+    Sidebar,
+    KeyColumn,
+}
+
+struct ResizeDrag {
+    kind: ResizeKind,
+    origin_x: f32,
+    origin_w: f32,
 }
 
 struct VisibleLayout {
@@ -162,6 +189,12 @@ pub struct EnvyApp {
     pending_launch: Option<String>,
     pending_file: Option<PathBuf>,
     pending_key: Option<String>,
+    file_prompt: FilePrompt,
+    file_prompt_sub: Option<Subscription>,
+    sidebar_width: f32,
+    /// `None` until the divider is dragged. The column then fits the longest key.
+    key_column_width: Option<f32>,
+    resize_drag: Option<ResizeDrag>,
     startup_logged: bool,
     ui_ready: Duration,
     config_load: Duration,
@@ -279,6 +312,11 @@ impl EnvyApp {
             pending_launch: launch,
             pending_file: None,
             pending_key: None,
+            file_prompt: FilePrompt::None,
+            file_prompt_sub: None,
+            sidebar_width: SIDEBAR_W.as_f32(),
+            key_column_width: None,
+            resize_drag: None,
             startup_logged: false,
             ui_ready: crate::STARTED
                 .get()
@@ -331,6 +369,12 @@ impl EnvyApp {
     ) {
         self.config = config;
         self.editor_view = self.config.settings.editor_view;
+        if let Some(width) = self.config.settings.sidebar_width {
+            self.sidebar_width = clamp_sidebar_px(width as f32);
+        }
+        if let Some(width) = self.config.settings.key_column_width {
+            self.key_column_width = Some(clamp_key_column_px(width as f32));
+        }
         self.sort_recent = self.config.recent_projects.clone();
         self.booting = false;
         let hotkey = self.config.settings.global_hotkey.clone();
@@ -852,10 +896,16 @@ impl EnvyApp {
             .iter()
             .enumerate()
             .filter(|(_, project)| {
-                query.is_empty()
-                    || fuzzy_hit(&project.name, &query)
-                    || fuzzy_hit(&project.root.display().to_string(), &query)
-                    || fuzzy_hit(&project.branch, &query)
+                if query.is_empty() {
+                    return true;
+                }
+                let raw = project.root.display().to_string();
+                let native = native_project_path(&raw, host_path_style());
+                let pretty = displayed_project_path(&native);
+                fuzzy_hit(&project.name, &query)
+                    || fuzzy_hit(&raw, &query)
+                    || fuzzy_hit(&native, &query)
+                    || fuzzy_hit(&pretty, &query)
             })
             .map(|(index, _)| index)
             .collect();
@@ -875,14 +925,37 @@ impl EnvyApp {
         let Some(index) = self.project_ix else {
             return;
         };
-        let Some(position) = self
-            .visible_project_indexes()
-            .iter()
-            .position(|visible| *visible == index)
-        else {
+        let Some(position) = self.project_visual_index(index) else {
             return;
         };
         self.project_scroll.scroll_to_item(position);
+    }
+
+    /// Child index in the project list, counting the section headers.
+    fn project_visual_index(&self, target: usize) -> Option<usize> {
+        let visible = self.visible_project_indexes();
+        let mut visual = 0usize;
+        let mut saw_favorite = false;
+        let mut saw_other = false;
+        for index in visible {
+            let favorite = self
+                .projects
+                .get(index)
+                .is_some_and(|project| self.config.is_favorite(&project.root));
+            if favorite && !saw_favorite {
+                visual += 1;
+                saw_favorite = true;
+            }
+            if !favorite && !saw_other {
+                visual += 1;
+                saw_other = true;
+            }
+            if index == target {
+                return Some(visual);
+            }
+            visual += 1;
+        }
+        None
     }
 
     fn focus_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1998,6 +2071,12 @@ impl EnvyApp {
             self.close_overlay(window, cx);
             return;
         }
+        if !matches!(self.file_prompt, FilePrompt::None) {
+            self.close_file_prompt();
+            self.focus_self(window, cx);
+            cx.notify();
+            return;
+        }
         if self.editor.is_some() {
             self.close_editor();
             self.focus_self(window, cx);
@@ -2096,6 +2175,97 @@ impl EnvyApp {
             cx,
         );
         self.key_scroll.scroll_to_bottom();
+    }
+
+    fn edit_entry_at(
+        &mut self,
+        row_ix: usize,
+        target: RowTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.zone = Zone::Keys;
+        self.cursor = row_ix;
+        let same = self.editor.as_ref().is_some_and(|editor| {
+            editor.node == self.selected_node()
+                && matches!(
+                    (target, &editor.kind),
+                    (RowTarget::KeyName, EditKind::Rename) | (RowTarget::Value, EditKind::Value)
+                )
+        });
+        if same {
+            return;
+        }
+        if self.editor.is_some() {
+            self.commit_editor(None, window, cx);
+            self.cursor = row_ix;
+        }
+        match row_click(target) {
+            RowClick::EditKey => self.begin_rename(window, cx),
+            RowClick::EditValue => self.begin_value_edit(window, cx),
+        }
+    }
+
+    fn effective_key_column(&self) -> f32 {
+        if let Some(width) = self.key_column_width {
+            return clamp_key_column_px(width);
+        }
+        let labels = self.open.as_ref().map(|open| {
+            open.document
+                .entries()
+                .map(|(_, entry)| {
+                    if entry.exported {
+                        format!("export {}", entry.key)
+                    } else {
+                        entry.key.clone()
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
+        fitted_key_column_px(labels.unwrap_or_default())
+    }
+
+    fn begin_resize(&mut self, kind: ResizeKind, x: f32, cx: &mut Context<Self>) {
+        let origin_w = match kind {
+            ResizeKind::Sidebar => self.sidebar_width,
+            ResizeKind::KeyColumn => self.effective_key_column(),
+        };
+        self.resize_drag = Some(ResizeDrag {
+            kind,
+            origin_x: x,
+            origin_w,
+        });
+        cx.notify();
+    }
+
+    fn update_resize(&mut self, x: f32, cx: &mut Context<Self>) {
+        let Some(drag) = &self.resize_drag else {
+            return;
+        };
+        let next = drag.origin_w + (x - drag.origin_x);
+        match drag.kind {
+            ResizeKind::Sidebar => self.sidebar_width = clamp_sidebar_px(next),
+            ResizeKind::KeyColumn => self.key_column_width = Some(clamp_key_column_px(next)),
+        }
+        cx.notify();
+    }
+
+    fn end_resize(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.resize_drag.take() else {
+            return;
+        };
+        match drag.kind {
+            ResizeKind::Sidebar => {
+                self.config.settings.sidebar_width = Some(self.sidebar_width.round() as u32);
+            }
+            ResizeKind::KeyColumn => {
+                if let Some(width) = self.key_column_width {
+                    self.config.settings.key_column_width = Some(width.round() as u32);
+                }
+            }
+        }
+        self.persist_config(cx);
+        cx.notify();
     }
 
     fn open_editor(
@@ -2273,6 +2443,12 @@ impl EnvyApp {
             self.status = format!("{key} is already in this file.");
             return;
         }
+        let unchanged = self.open.as_ref().is_some_and(|open| {
+            matches!(open.document.nodes.get(node), Some(Node::Entry(entry)) if entry.key == key)
+        });
+        if unchanged {
+            return;
+        }
         let Some(open) = self.open.as_mut() else {
             return;
         };
@@ -2334,6 +2510,25 @@ impl EnvyApp {
         } else {
             "Copied.".into()
         };
+        cx.notify();
+    }
+
+    fn copy_all(&mut self, cx: &mut Context<Self>) {
+        let Some(text) = self
+            .open
+            .as_ref()
+            .map(|open| open.document.export_enabled())
+        else {
+            return;
+        };
+        if text.is_empty() {
+            self.status = "No keys to copy.".into();
+            cx.notify();
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+        self.arm_clear(text, cx);
+        self.status = "Copied.".into();
         cx.notify();
     }
 
@@ -2744,6 +2939,274 @@ impl EnvyApp {
         .detach();
     }
 
+    fn file_prompt_input(&self) -> Option<&Entity<InputState>> {
+        match &self.file_prompt {
+            FilePrompt::Create { input, .. } | FilePrompt::Rename { input, .. } => Some(input),
+            FilePrompt::None => None,
+        }
+    }
+
+    fn file_prompt_focused(&self, window: &Window, cx: &App) -> bool {
+        self.file_prompt_input()
+            .is_some_and(|input| input.focus_handle(cx).is_focused(window))
+    }
+
+    fn close_file_prompt(&mut self) {
+        self.file_prompt = FilePrompt::None;
+        self.file_prompt_sub = None;
+    }
+
+    fn set_file_prompt_error(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
+        let message = message.into();
+        match &mut self.file_prompt {
+            FilePrompt::Create { error, .. } | FilePrompt::Rename { error, .. } => {
+                *error = Some(message.clone());
+            }
+            FilePrompt::None => {}
+        }
+        self.status = message;
+        cx.notify();
+    }
+
+    fn clear_file_prompt_error(&mut self) {
+        match &mut self.file_prompt {
+            FilePrompt::Create { error, .. } | FilePrompt::Rename { error, .. } => *error = None,
+            FilePrompt::None => {}
+        }
+    }
+
+    fn focus_file_prompt(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(input) = self.file_prompt_input().cloned() else {
+            return;
+        };
+        input.update(cx, |state, cx| state.select_all(window, cx));
+        let handle = input.focus_handle(cx);
+        window.focus(&handle, cx);
+    }
+
+    fn open_file_prompt(
+        &mut self,
+        prompt: FilePrompt,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(input) = (match &prompt {
+            FilePrompt::Create { input, .. } | FilePrompt::Rename { input, .. } => {
+                Some(input.clone())
+            }
+            FilePrompt::None => None,
+        }) else {
+            return;
+        };
+        self.close_file_prompt();
+        self.file_prompt_sub =
+            Some(
+                cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
+                    InputEvent::PressEnter { .. } => this.commit_file_prompt(window, cx),
+                    InputEvent::Change => {
+                        this.clear_file_prompt_error();
+                        cx.notify();
+                    }
+                    InputEvent::Focus | InputEvent::Blur => {}
+                }),
+            );
+        self.file_prompt = prompt;
+        self.focus_file_prompt(window, cx);
+        cx.notify();
+    }
+
+    fn begin_create_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .project_ix
+            .and_then(|ix| self.projects.get(ix))
+            .is_none()
+        {
+            self.status = "Open a project first.".into();
+            cx.notify();
+            return;
+        }
+        if self.editor.is_some() {
+            self.commit_editor(None, window, cx);
+        }
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(".env.local")
+                .placeholder("File name")
+        });
+        self.open_file_prompt(FilePrompt::Create { input, error: None }, window, cx);
+    }
+
+    fn begin_rename_file(&mut self, file_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = self
+            .project_ix
+            .and_then(|ix| self.projects.get(ix))
+            .and_then(|project| project.files.get(file_ix))
+            .map(|file| file.name.clone())
+        else {
+            return;
+        };
+        if self.editor.is_some() {
+            self.commit_editor(None, window, cx);
+        }
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(name)
+                .placeholder("File name")
+        });
+        self.open_file_prompt(
+            FilePrompt::Rename {
+                file_ix,
+                input,
+                error: None,
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn current_file_names(&self) -> Vec<String> {
+        self.project_ix
+            .and_then(|ix| self.projects.get(ix))
+            .map(|project| project.files.iter().map(|file| file.name.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    fn commit_file_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let names = self.current_file_names();
+        let (creating, file_ix, text) = match &self.file_prompt {
+            FilePrompt::Create { input, .. } => (true, None, input.read(cx).value().to_string()),
+            FilePrompt::Rename { file_ix, input, .. } => {
+                (false, Some(*file_ix), input.read(cx).value().to_string())
+            }
+            FilePrompt::None => return,
+        };
+        let ignoring = file_ix.and_then(|index| names.get(index)).cloned();
+        let name = match check_env_filename(&text, &names, ignoring.as_deref()) {
+            Ok(name) => name,
+            Err(EnvFileNameError::Empty) => {
+                self.set_file_prompt_error("Enter a file name.", cx);
+                return;
+            }
+            Err(EnvFileNameError::NotEnv | EnvFileNameError::Nested) => {
+                self.set_file_prompt_error("Use a name like .env or .env.local.", cx);
+                return;
+            }
+            Err(EnvFileNameError::Collision) => {
+                self.set_file_prompt_error("A file with that name already exists.", cx);
+                return;
+            }
+        };
+        if ignoring.as_deref() == Some(name.as_str()) {
+            self.close_file_prompt();
+            self.focus_self(window, cx);
+            cx.notify();
+            return;
+        }
+        let Some(project_ix) = self.project_ix else {
+            return;
+        };
+        let Some(project) = self.projects.get(project_ix) else {
+            return;
+        };
+        if creating {
+            let dest = project.root.join(&name);
+            self.close_file_prompt();
+            self.focus_self(window, cx);
+            self.spawn_create_file(dest, name, cx);
+        } else {
+            let Some(file_ix) = file_ix else {
+                return;
+            };
+            let Some(from) = project.files.get(file_ix).map(|file| file.path.clone()) else {
+                return;
+            };
+            let Some(parent) = from.parent().map(|parent| parent.to_path_buf()) else {
+                return;
+            };
+            let dest = parent.join(&name);
+            self.close_file_prompt();
+            self.focus_self(window, cx);
+            self.spawn_rename_file(from, dest, name, cx);
+        }
+    }
+
+    fn spawn_create_file(&mut self, dest: PathBuf, name: String, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, async_cx| {
+            let created = async_cx
+                .background_executor()
+                .spawn(async move { OpenFile::create(&dest, EnvDocument::parse("")).map(|_| dest) })
+                .await;
+            let _ = this.update(async_cx, |view, cx| {
+                match created {
+                    Ok(path) => {
+                        view.pending_file = Some(path);
+                        view.status = format!("Created {name}.");
+                        view.begin_scan(true, cx);
+                    }
+                    Err(_) => view.status = "Couldn't create that file.".into(),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn spawn_rename_file(
+        &mut self,
+        from: PathBuf,
+        dest: PathBuf,
+        name: String,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, async_cx| {
+            let renamed = async_cx
+                .background_executor()
+                .spawn(async move {
+                    rename_env_file(&from, &dest)?;
+                    let mtime = std::fs::metadata(&dest)
+                        .and_then(|meta| meta.modified())
+                        .ok();
+                    Ok::<_, std::io::Error>((from, dest, mtime))
+                })
+                .await;
+            let _ = this.update(async_cx, |view, cx| {
+                match renamed {
+                    Ok((from, dest, mtime)) => {
+                        view.retarget_file(&from, &dest, mtime);
+                        view.status = format!("Renamed to {name}.");
+                        view.begin_scan(true, cx);
+                    }
+                    Err(_) => view.status = "Couldn't rename that file.".into(),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn retarget_file(&mut self, from: &Path, to: &Path, mtime: Option<SystemTime>) {
+        let name = to
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        for project in &mut self.projects {
+            if let Some(file) = project.files.iter_mut().find(|file| file.path == from) {
+                file.path = to.to_path_buf();
+                file.name = name.clone();
+                file.prod = is_prod_filename(&file.name);
+            }
+        }
+        if let Some(open) = self.open.as_mut() {
+            if open.path == from {
+                open.path = to.to_path_buf();
+                if mtime.is_some() {
+                    open.mtime = mtime;
+                }
+                open.external_change = false;
+            }
+        }
+    }
+
     fn paste_from_clipboard(&mut self, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
             self.status = "Clipboard is empty.".into();
@@ -2862,6 +3325,11 @@ impl EnvyApp {
             }
         }
         match key {
+            "tab" if self.file_prompt_focused(window, cx) => {
+                self.commit_file_prompt(window, cx);
+                window.prevent_default();
+                cx.stop_propagation();
+            }
             "tab" if self.editor.is_some() => {
                 self.commit_focused_field(window, cx);
                 window.prevent_default();
@@ -3060,7 +3528,18 @@ impl Render for EnvyApp {
         let mono = cx.theme().mono_font_family.clone();
         let ui_font = cx.theme().font_family.clone();
 
-        let sidebar = self.render_sidebar(p, window, cx);
+        let sidebar = div()
+            .relative()
+            .w(px(self.sidebar_width))
+            .h_full()
+            .flex_shrink_0()
+            .child(self.render_sidebar(p, window, cx))
+            .child(Self::resize_handle(
+                "sidebar-resize",
+                ResizeKind::Sidebar,
+                p,
+                cx.entity(),
+            ));
         let center = if self.booting && self.projects.is_empty() {
             v_flex()
                 .flex_1()
@@ -3211,11 +3690,14 @@ impl Render for EnvyApp {
         if !matches!(self.overlay, Overlay::None) {
             root = root.child(self.overlay_view(p, mono, window, cx));
         }
+        if self.resize_drag.is_some() {
+            root = root.child(self.resize_overlay(cx));
+        }
 
         let active_project = self.project_ix.and_then(|ix| self.projects.get(ix));
         let mut title_content = h_flex().flex_1().min_w(px(0.)).items_center().child(
             h_flex()
-                .w(SIDEBAR_W - px(12.))
+                .w(px((self.sidebar_width - 12.).max(120.)))
                 .flex_shrink_0()
                 .gap(px(8.))
                 .items_center()
@@ -3289,6 +3771,61 @@ impl Render for EnvyApp {
 }
 
 impl EnvyApp {
+    fn resize_handle(
+        id: &'static str,
+        kind: ResizeKind,
+        p: Palette,
+        entity: Entity<Self>,
+    ) -> gpui_kit::Div {
+        let group = SharedString::from(id);
+        let down = entity.clone();
+        let up = entity;
+        div()
+            .group(group.clone())
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right(px(-3.))
+            .w(px(7.))
+            .cursor_col_resize()
+            .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+                cx.stop_propagation();
+                let x = event.position.x.as_f32();
+                down.update(cx, |this, cx| this.begin_resize(kind, x, cx));
+            })
+            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                cx.stop_propagation();
+                up.update(cx, |this, cx| this.end_resize(cx));
+            })
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(3.))
+                    .w(px(1.))
+                    .bg(p.border_hairline)
+                    .group_hover(group, move |line| line.bg(p.accent)),
+            )
+    }
+
+    fn resize_overlay(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
+        let move_entity = cx.entity();
+        let up_entity = cx.entity();
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .cursor_col_resize()
+            .on_mouse_move(move |event, _, cx| {
+                let x = event.position.x.as_f32();
+                move_entity.update(cx, |this, cx| this.update_resize(x, cx));
+            })
+            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                up_entity.update(cx, |this, cx| this.end_resize(cx));
+            })
+    }
+
     fn render_sidebar(
         &self,
         p: Palette,
@@ -3450,14 +3987,31 @@ impl EnvyApp {
             );
         }
 
+        let path_budget = sidebar_path_chars(self.sidebar_width.round() as u32);
+        let mut last_favorite: Option<bool> = None;
         for (visible_ix, index) in visible_projects.iter().copied().enumerate() {
             let project = &project_rows[index];
             let selected = project_ix == Some(index);
             let favorite = self.config.is_favorite(&project.root);
-            let branch = display_branch(&project.branch).map(str::to_string);
+            if last_favorite != Some(favorite) {
+                project_list = project_list.child(sidebar_section(
+                    if favorite {
+                        "FAVORITES"
+                    } else {
+                        "ALL PROJECTS"
+                    },
+                    last_favorite.is_some(),
+                    p,
+                ));
+                last_favorite = Some(favorite);
+            }
             let entity = entity.clone();
             let star_entity = entity.clone();
             let group = SharedString::from(format!("project-row-{index}"));
+            let native =
+                native_project_path(&project.root.display().to_string(), host_path_style());
+            let pretty = displayed_project_path(&native);
+            let path_label = truncate_path_head(&pretty, path_budget);
 
             let row_bg = if selected && list_focused {
                 Some(p.bg_selected_accent)
@@ -3467,18 +4021,12 @@ impl EnvyApp {
                 None
             };
 
-            let row_h = if branch.is_some() {
-                SIDEBAR_ROW_BRANCH_H
-            } else {
-                SIDEBAR_ROW_COMPACT_H
-            };
-
             let mut row = h_flex()
                 .id(SharedString::from(format!("project-{visible_ix}")))
                 .group(group.clone())
                 .mx(px(8.))
                 .px(px(8.))
-                .h(row_h)
+                .h(SIDEBAR_ROW_BRANCH_H)
                 .flex_shrink_0()
                 .gap(px(8.))
                 .rounded(px(6.))
@@ -3491,11 +4039,7 @@ impl EnvyApp {
                 .items_center()
                 .overflow_hidden()
                 .cursor_pointer()
-                .tooltip(hover_tip(format!(
-                    "{} · {}",
-                    project.name,
-                    project.root.display()
-                )))
+                .tooltip(hover_tip(native))
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                     entity.update(cx, |this, cx| {
                         this.zone = Zone::Projects;
@@ -3510,19 +4054,11 @@ impl EnvyApp {
                 row = row.hover(move |style| style.bg(p.bg_hover));
             }
 
-            row = row.child(
-                div()
-                    .size(px(6.))
-                    .rounded(px(999.))
-                    .flex_shrink_0()
-                    .when(project.missing_vs_example, |dot| dot.bg(p.warning_dot)),
-            );
-
-            let mut text_col = v_flex()
+            let text_col = v_flex()
                 .flex_1()
                 .min_w(px(0.))
                 .justify_center()
-                .gap(px(2.))
+                .gap(px(1.))
                 .child(
                     div()
                         .text_size(px(13.))
@@ -3539,31 +4075,16 @@ impl EnvyApp {
                             p.fg_primary.opacity(0.92)
                         })
                         .child(project.name.clone()),
-                );
-
-            if let Some(branch_name) = branch {
-                text_col = text_col.child(
-                    h_flex()
-                        .items_center()
-                        .gap(px(4.))
+                )
+                .child(
+                    div()
                         .min_w(px(0.))
-                        .child(
-                            Icon::new(IconName::GitBranch)
-                                .size(px(12.))
-                                .text_color(p.fg_tertiary),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .text_size(px(11.))
-                                .line_height(px(14.))
-                                .text_color(p.fg_tertiary)
-                                .truncate()
-                                .child(branch_name),
-                        ),
+                        .text_size(px(11.))
+                        .line_height(px(14.))
+                        .text_color(p.fg_tertiary)
+                        .truncate()
+                        .child(path_label),
                 );
-            }
 
             row = row.child(text_col);
 
@@ -3606,8 +4127,7 @@ impl EnvyApp {
         }
 
         v_flex()
-            .w(SIDEBAR_W)
-            .flex_shrink_0()
+            .w_full()
             .h_full()
             .bg(p.bg_chrome)
             .text_color(p.fg_primary)
@@ -3671,6 +4191,12 @@ impl EnvyApp {
             let cursor_tab = zone == Zone::Tabs && self.tab_cursor == index;
             let entity = cx.entity();
             let name = file.name.clone();
+            if let FilePrompt::Rename { file_ix, input, .. } = &self.file_prompt {
+                if *file_ix == index {
+                    tabs = tabs.child(file_name_field(input, p, mono.clone()));
+                    continue;
+                }
+            }
 
             let mut tip_parts = vec![name.clone()];
             if file.prod {
@@ -3713,7 +4239,12 @@ impl EnvyApp {
                     entity.update(cx, |this, cx| {
                         this.zone = Zone::Tabs;
                         this.tab_cursor = index;
-                        if event.modifiers.control || event.modifiers.shift {
+                        if event.click_count >= 2
+                            && !event.modifiers.control
+                            && !event.modifiers.shift
+                        {
+                            this.begin_rename_file(index, window, cx);
+                        } else if event.modifiers.control || event.modifiers.shift {
                             this.toggle_compare_tab(index, cx);
                         } else {
                             this.activate_tab(index, false, window, cx);
@@ -3799,7 +4330,27 @@ impl EnvyApp {
             tabs = tabs.child(tab);
         }
 
-        tabs
+        if let FilePrompt::Create { input, .. } = &self.file_prompt {
+            tabs = tabs.child(file_name_field(input, p, mono.clone()));
+        }
+
+        let error = match &self.file_prompt {
+            FilePrompt::Create { error, .. } | FilePrompt::Rename { error, .. } => error.clone(),
+            FilePrompt::None => None,
+        };
+        let mut column = v_flex().w_full().flex_shrink_0().child(tabs);
+        if let Some(error) = error {
+            column = column.child(
+                div()
+                    .px(px(12.))
+                    .pb(px(6.))
+                    .text_size(px(11.5))
+                    .line_height(px(15.))
+                    .text_color(p.danger)
+                    .child(error),
+            );
+        }
+        column
     }
 
     fn render_toolbar(
@@ -4038,14 +4589,36 @@ impl EnvyApp {
             .gap(px(4.))
             .flex_shrink_0()
             .child(
-                toolbar_icon_button("tb-new", IconName::Plus, "New key", false, !has_open, p)
-                    .tooltip_with_action("New key", &NewKey, Some("Envy"))
-                    .on_click({
-                        let entity = entity.clone();
-                        move |_, window, cx| {
-                            entity.update(cx, |this, cx| this.begin_new_key(window, cx));
-                        }
-                    }),
+                toolbar_icon_button(
+                    "tb-copy-all",
+                    IconName::Copy,
+                    "Copy all",
+                    false,
+                    !has_open,
+                    p,
+                )
+                .on_click({
+                    let entity = entity.clone();
+                    move |_, _, cx| {
+                        entity.update(cx, |this, cx| this.copy_all(cx));
+                    }
+                }),
+            )
+            .child(
+                toolbar_icon_button(
+                    "tb-new",
+                    IconName::Plus,
+                    "New file",
+                    false,
+                    self.project_ix.is_none(),
+                    p,
+                )
+                .on_click({
+                    let entity = entity.clone();
+                    move |_, window, cx| {
+                        entity.update(cx, |this, cx| this.begin_create_file(window, cx));
+                    }
+                }),
             )
             .child(
                 toolbar_icon_button("tb-undo", IconName::Undo2, "Undo", false, !can_undo, p)
@@ -4261,6 +4834,7 @@ impl EnvyApp {
         let entity = cx.entity();
 
         let has_any_entries = !visible_layout.entry_nodes.is_empty();
+        let key_w = px(self.effective_key_column());
 
         let col_header = h_flex()
             .h(COL_HEADER_H)
@@ -4272,7 +4846,8 @@ impl EnvyApp {
             .border_color(p.border_hairline)
             .child(
                 div()
-                    .w(KEY_COL_W)
+                    .relative()
+                    .w(key_w)
                     .flex_shrink_0()
                     .pl(px(30.))
                     .pr(px(16.))
@@ -4280,7 +4855,13 @@ impl EnvyApp {
                     .line_height(px(14.))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(p.fg_tertiary)
-                    .child("KEY"),
+                    .child("KEY")
+                    .child(Self::resize_handle(
+                        "key-col-resize",
+                        ResizeKind::KeyColumn,
+                        p,
+                        entity.clone(),
+                    )),
             )
             .child(
                 div()
@@ -4366,7 +4947,7 @@ impl EnvyApp {
                     let exported = entry.exported;
                     let disabled = entry.disabled;
                     let related = *related_to_active;
-                    let has_desc = description.is_some();
+                    let description = description.clone();
 
                     let selected = cursor == row_ix;
                     let visible = show_all || revealed.contains(&key);
@@ -4396,17 +4977,7 @@ impl EnvyApp {
                         None
                     };
 
-                    let row_h = if editing_this {
-                        if has_desc {
-                            px(46.)
-                        } else {
-                            px(36.)
-                        }
-                    } else if has_desc {
-                        KEY_ROW_DESC_H
-                    } else {
-                        KEY_ROW_H
-                    };
+                    let row_h = if editing_this { px(36.) } else { KEY_ROW_H };
 
                     let mut row = h_flex()
                         .id(SharedString::from(format!("key-{node}")))
@@ -4425,16 +4996,12 @@ impl EnvyApp {
                         .items_center()
                         .overflow_hidden()
                         .cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                             click_entity.update(cx, |this, cx| {
                                 this.zone = Zone::Keys;
                                 this.cursor = row_ix;
-                                if event.click_count >= 2 {
-                                    this.begin_value_edit(window, cx);
-                                } else {
-                                    this.focus_self(window, cx);
-                                    cx.notify();
-                                }
+                                this.focus_self(window, cx);
+                                cx.notify();
                             });
                         });
 
@@ -4448,12 +5015,12 @@ impl EnvyApp {
                     let desc_hit = query_active
                         && description.as_deref().is_some_and(|d| fuzzy_hit(d, &query));
                     let key_color = if disabled {
-                        if key_hit {
+                        if key_hit || desc_hit {
                             p.accent.opacity(0.75)
                         } else {
                             p.fg_tertiary
                         }
-                    } else if key_hit {
+                    } else if key_hit || desc_hit {
                         p.accent
                     } else {
                         p.fg_primary
@@ -4469,7 +5036,7 @@ impl EnvyApp {
                     }
                     if let Some(desc) = description {
                         full_key_tip.push('\n');
-                        full_key_tip.push_str(desc);
+                        full_key_tip.push_str(&desc);
                     }
 
                     let mut toggle_btn = div()
@@ -4485,9 +5052,9 @@ impl EnvyApp {
                         .justify_center()
                         .cursor_pointer()
                         .tooltip(hover_tip(if disabled {
-                            "Turn on · Ctrl+/"
+                            "Turn on · Ctrl+Space"
                         } else {
-                            "Turn off · Ctrl+/"
+                            "Turn off · Ctrl+Space"
                         }))
                         .hover(move |style| style.bg(p.accent_subtle).border_color(p.accent_ring))
                         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
@@ -4517,17 +5084,18 @@ impl EnvyApp {
                             .group_hover(key_group.clone(), |style| style.visible());
                     }
 
+                    let key_edit = entity.clone();
                     let key_cell = if show_rename_input {
                         if let Some(key_input) = self.editor.as_ref().and_then(|e| e.key.as_ref()) {
                             div()
-                                .w(KEY_COL_W)
+                                .w(key_w)
                                 .flex_shrink_0()
                                 .pr(px(12.))
                                 .font_family(mono.clone())
                                 .child(Input::new(key_input).small())
                                 .into_any_element()
                         } else {
-                            div().w(KEY_COL_W).flex_shrink_0().into_any_element()
+                            div().w(key_w).flex_shrink_0().into_any_element()
                         }
                     } else {
                         let mut key_line = h_flex()
@@ -4553,33 +5121,23 @@ impl EnvyApp {
                                 .child(key.clone()),
                         );
 
-                        let mut text_col = v_flex()
+                        let text_col = v_flex()
                             .id(SharedString::from(format!("key-text-{node}")))
                             .flex_1()
                             .min_w(px(0.))
-                            .gap(px(1.))
+                            .cursor_text()
                             .tooltip(hover_tip(full_key_tip))
+                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                cx.stop_propagation();
+                                key_edit.update(cx, |this, cx| {
+                                    this.edit_entry_at(row_ix, RowTarget::KeyName, window, cx);
+                                });
+                            })
                             .child(key_line);
-                        if let Some(desc) = description {
-                            let one_line = desc.replace('\n', " · ");
-                            text_col = text_col.child(
-                                div()
-                                    .min_w(px(0.))
-                                    .text_size(px(11.))
-                                    .line_height(px(14.))
-                                    .truncate()
-                                    .text_color(if desc_hit {
-                                        p.accent.opacity(0.85)
-                                    } else {
-                                        p.fg_tertiary
-                                    })
-                                    .child(one_line),
-                            );
-                        }
 
                         let mut cell = h_flex()
                             .id(SharedString::from(format!("key-name-{node}")))
-                            .w(KEY_COL_W)
+                            .w(key_w)
                             .flex_shrink_0()
                             .pr(px(14.))
                             .min_w(px(0.))
@@ -4633,6 +5191,7 @@ impl EnvyApp {
                         } else {
                             String::new()
                         };
+                        let value_edit = entity.clone();
                         div()
                             .id(SharedString::from(format!("key-value-{node}")))
                             .flex_1()
@@ -4643,8 +5202,15 @@ impl EnvyApp {
                             .line_height(px(18.))
                             .truncate()
                             .text_color(value_color)
+                            .cursor_text()
                             .when(!value_tip.is_empty(), |cell| {
                                 cell.tooltip(hover_tip(value_tip))
+                            })
+                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                cx.stop_propagation();
+                                value_edit.update(cx, |this, cx| {
+                                    this.edit_entry_at(row_ix, RowTarget::Value, window, cx);
+                                });
                             })
                             .child(shown)
                             .into_any_element()
@@ -4731,7 +5297,7 @@ impl EnvyApp {
                 if let Some(key_input) = &editor.key {
                     row = row.child(
                         div()
-                            .w(KEY_COL_W)
+                            .w(key_w)
                             .flex_shrink_0()
                             .pr(px(12.))
                             .font_family(mono.clone())
@@ -4967,7 +5533,7 @@ impl EnvyApp {
             .ml(px(16.))
             .mt(px(3.))
             .mb(px(4.))
-            .w(KEY_COL_W - px(12.))
+            .w(px(self.effective_key_column()) - px(12.))
             .flex_shrink_0()
             .rounded(px(6.))
             .bg(p.bg_chrome)
@@ -5214,7 +5780,7 @@ impl EnvyApp {
                 Zone::Keys => &[
                     ("↑↓", "Move"),
                     ("Enter", "Edit"),
-                    ("Ctrl+/", "Toggle"),
+                    ("Ctrl+Space", "Toggle"),
                     ("Space", "Reveal"),
                     ("?", "Shortcuts"),
                 ],
@@ -6483,7 +7049,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("c", "Copy the value"),
     ("Space", "Show the value"),
     ("a", "Show every value"),
-    ("Ctrl+/", "Turn key on or off"),
+    ("Ctrl+Space", "Turn key on or off"),
     ("Ctrl+E", "Switch table / plain text"),
     ("n", "New key"),
     ("Ctrl+S", "Save"),
@@ -6837,6 +7403,62 @@ fn v_divider(p: Palette) -> gpui_kit::Div {
         .mx(px(4.))
         .bg(p.border_hairline)
         .flex_shrink_0()
+}
+
+fn displayed_project_path(native: &str) -> String {
+    match host_path_style() {
+        PathStyle::Windows => native.to_string(),
+        PathStyle::Unix => abbreviate_home(native, unix_home().as_deref()),
+    }
+}
+
+fn unix_home() -> Option<String> {
+    #[cfg(windows)]
+    {
+        None
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var("HOME").ok().filter(|home| !home.is_empty())
+    }
+}
+
+fn sidebar_section(label: &'static str, divider: bool, p: Palette) -> gpui_kit::Div {
+    v_flex()
+        .mx(px(8.))
+        .px(px(8.))
+        .pt(if divider { px(10.) } else { px(6.) })
+        .pb(px(2.))
+        .when(divider, |section| {
+            section
+                .mt(px(4.))
+                .border_t_1()
+                .border_color(p.border_hairline)
+        })
+        .child(
+            div()
+                .text_size(px(11.))
+                .line_height(px(14.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(p.fg_tertiary)
+                .child(label),
+        )
+}
+
+fn file_name_field(input: &Entity<InputState>, p: Palette, mono: SharedString) -> gpui_kit::Div {
+    div()
+        .w(px(168.))
+        .h(px(28.))
+        .mb(px(4.))
+        .flex_shrink_0()
+        .font_family(mono)
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(
+            Input::new(input)
+                .small()
+                .appearance(false)
+                .border_color(p.accent_ring),
+        )
 }
 
 fn toolbar_icon_button(

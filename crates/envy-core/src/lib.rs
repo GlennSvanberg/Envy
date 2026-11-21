@@ -8,6 +8,7 @@
 //! written to config or logs. A save uses a short-lived sibling file only long
 //! enough to rename it into place. Callers must not log [`Entry::value`].
 
+pub mod columns;
 pub mod config;
 pub mod deeplink;
 pub mod diff;
@@ -15,12 +16,19 @@ pub mod discover;
 pub mod document;
 pub mod future;
 pub mod hotkey;
+pub mod interact;
+pub mod names;
 pub mod paste;
+pub mod pathfmt;
 pub mod scaffold;
 pub mod search;
 pub mod session;
 pub mod suggest;
 
+pub use columns::{
+    clamp_key_column_px, clamp_sidebar_px, fitted_key_column_px, KEY_COLUMN_MAX_PX,
+    KEY_COLUMN_MIN_PX, SIDEBAR_DEFAULT_PX, SIDEBAR_MAX_PX, SIDEBAR_MIN_PX,
+};
 pub use config::{
     config_dir, config_path, sidebar_rank, Config, EditorView, Settings, ThemeSetting,
 };
@@ -36,7 +44,15 @@ pub use document::{
     Node, QuoteStyle, UnreadableLine, VerbatimKind,
 };
 pub use hotkey::{Hotkey, HotkeyError};
+pub use interact::{row_click, RowClick, RowTarget};
+pub use names::{
+    check_env_filename, env_name_taken, normalize_env_filename, rename_env_file, EnvFileNameError,
+};
 pub use paste::{apply_paste, plan_paste, PasteChange, PastePlan};
+pub use pathfmt::{
+    abbreviate_home, host_path_style, native_project_path, sidebar_path_chars, truncate_path_head,
+    PathStyle,
+};
 pub use scaffold::from_example;
 pub use search::{search, SearchHit, SearchKind};
 pub use session::{inspect_disk, save_text, DiskNotice, OpenFile};
