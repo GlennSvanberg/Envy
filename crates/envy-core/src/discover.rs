@@ -83,8 +83,11 @@ pub struct CachedFile {
 pub struct EnvFile {
     pub path: PathBuf,
     pub name: String,
-    /// Key names only, last-wins order. Values are not retained.
+    /// Key names only (active and disabled). Values are not retained.
     pub keys: Vec<String>,
+    /// Active (non-disabled) key names only. Used to compute missing keys vs
+    /// `.env.example` without treating commented-out example keys as required.
+    pub active_keys: Vec<String>,
     pub prod: bool,
     pub missing_vs_example: bool,
 }
@@ -108,6 +111,7 @@ struct Found {
     path: PathBuf,
     name: String,
     keys: Vec<String>,
+    active_keys: Vec<String>,
     /// Held only while the scan computes "missing vs example", then dropped.
     document: EnvDocument,
 }
@@ -264,10 +268,12 @@ pub fn fill_key_index(projects: &mut [Project]) {
                     Ok(text) => {
                         let document = EnvDocument::parse(&text);
                         let keys = document.key_names();
+                        let active_keys = document.active_key_names();
                         found.push(Found {
                             path: file.path.clone(),
                             name: file.name.clone(),
                             keys,
+                            active_keys,
                             document,
                         });
                     }
@@ -391,6 +397,7 @@ fn projects_from_found(found: Vec<FoundEnv>) -> Vec<Project> {
                 path: file.path,
                 name: file.name.clone(),
                 keys: Vec::new(),
+                active_keys: Vec::new(),
                 prod: is_prod_filename(&file.name),
                 missing_vs_example: false,
             },
@@ -405,6 +412,7 @@ pub fn upsert_file(projects: &mut Vec<Project>, root: PathBuf, file: EnvFile) {
         if let Some(existing) = project.files.iter_mut().find(|item| item.path == file.path) {
             if existing.keys.is_empty() {
                 existing.keys = file.keys;
+                existing.active_keys = file.active_keys;
                 existing.missing_vs_example = file.missing_vs_example;
                 existing.prod = file.prod;
             }
@@ -551,6 +559,7 @@ fn build_project(root: PathBuf, files: Vec<Found>) -> Project {
             path: file.path.clone(),
             name: file.name.clone(),
             keys: file.keys.clone(),
+            active_keys: file.active_keys.clone(),
             prod: is_prod_filename(&file.name),
             missing_vs_example: missing,
         });
@@ -862,6 +871,39 @@ mod tests {
             .files
             .iter()
             .any(|file| file.keys.iter().any(|key| key == "SECRET")));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn disabled_keys_do_not_count_as_missing_vs_example() {
+        let root = scratch();
+        let repo = root.join("app");
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(
+            repo.join(".env.example"),
+            "A=1\nB=2\n# OPTIONAL_FLAG=true\n",
+        )
+        .unwrap();
+        fs::write(repo.join(".env.local"), "A=1\n# B=2\n").unwrap();
+
+        let (projects, errors) = discover(&[root.clone()], &Config::default());
+        assert!(errors.is_empty(), "{errors:?}");
+        let project = &projects[0];
+        let example = project
+            .files
+            .iter()
+            .find(|f| f.name == ".env.example")
+            .unwrap();
+        let local = project
+            .files
+            .iter()
+            .find(|f| f.name == ".env.local")
+            .unwrap();
+
+        assert_eq!(example.active_keys, vec!["A", "B"]);
+        assert_eq!(local.keys, vec!["A", "B"]);
+        assert!(!local.missing_vs_example);
+        assert!(!project.missing_vs_example);
         let _ = fs::remove_dir_all(&root);
     }
 

@@ -28,7 +28,10 @@ pub use discover::{
     is_env_filename, is_skipped_dir, load_index_cache, projects_from_cache, save_index_cache,
     scan_paths, upsert_file, EnvFile, FoundEnv, IndexCache, Project, ScanError, MAX_SCAN_DEPTH,
 };
-pub use document::{is_env_key, Entry, EnvDocument, Node, QuoteStyle};
+pub use document::{
+    classify_verbatim, is_env_key, DocumentLayout, Entry, EnvDocument, KeySnapshot, LayoutItem,
+    Node, QuoteStyle, UnreadableLine, VerbatimKind,
+};
 pub use hotkey::{Hotkey, HotkeyError};
 pub use paste::{apply_paste, plan_paste, PasteChange, PastePlan};
 pub use scaffold::from_example;

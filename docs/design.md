@@ -113,7 +113,8 @@ Two font families only:
 | File tab bar | `36 px` height | Full-width strip above toolbar |
 | Workspace toolbar | `40 px` height | Search/summary left, grouped icon buttons right |
 | Column header strip | `28 px` height | Edge-to-edge strip matching exact column widths of rows below |
-| Key row | `32 px` fixed height | Single-line, baseline-aligned mono key (`256 px`) & value (`flex_1`) |
+| Section divider row | `28 px` height | Discreet group label (`11 px`, `fg.tertiary`) + `1 px` `border.hairline` rule |
+| Key row | `32 px` / `44 px` (with description) | Mono key (`276 px` incl. `20 px` on/off toggle) & value (`flex_1`); description subline `11 px / 14 px` |
 | Compare row | `32 px` fixed height | Single-line, edge-to-edge 4-column aligned grid (`256 px` key, `56 px` centered copy gutter) |
 | Footer / Status bar | `28 px` height | Short project-relative path or status left, keycap hints right |
 | Toolbar icon button | `28 × 28 px` | `15 px` Lucide icon, `6 px` radius |
@@ -185,16 +186,17 @@ Two font families only:
   - `KEY` — `w(256 px)`, `flex_shrink_0`, `pr(16 px)`
   - `VALUE` — `flex_1`, `min_w(0)`
   - Actions spacer — `w(64 px)`, `flex_shrink_0`
-- **Key rows (`32 px` fixed height, `mx(8 px)`, `px(7 px)` + `1 px` border = `16 px` inner edge, `rounded(6 px)`):**
+- **Key rows (`32 px` single-line, `44 px` with description, `mx(8 px)`, `px(7 px)` + `1 px` border = `16 px` inner edge, `rounded(6 px)`):**
   - Subtle hover (`bg.hover`), selected unfocused (`bg.selected_muted`, no border), selected focused (`bg.selected_accent` + `1 px accent.ring`, `fg.primary` text).
-  - **Key column:** `w(256 px)`, `flex_shrink_0`, `pr(16 px)`, `mono`, `13 px / 18 px`, `truncate()`, tooltip with full key name. `export ` prefix rendered in `fg.tertiary` if exported.
-  - **Value column:** `flex_1`, `min_w(0)`, `mono`, `13 px / 18 px`, `truncate()`.
+  - **Key column (`w(276 px)`):** Leading `20 × 20 px` on/off toggle icon (`ToggleRight` in quiet `accent` for active entries, `ToggleLeft` in `fg.tertiary` for commented-out/disabled entries; tooltip `"Turn off · Ctrl+/"` / `"Turn on · Ctrl+/"`). When both an active and disabled line exist for the same key, the disabled row sits directly beneath the active row with a `10 px` indent and `11 px` `CornerDownRight` indicator (never merged). Key name in mono (`13 px / 18 px`, `fg.primary`, or `fg.tertiary` when disabled), optional `export ` prefix in `fg.tertiary`, and optional description comment subline (`11 px / 14 px`, `fg.tertiary`, full multi-line text in tooltip).
+  - **Section dividers (`28 px`):** Standalone comments and decorated section headers (`# --- Database ---`) render as discreet non-selectable dividers (`11 px` `fg.tertiary` label + `1 px` `border.hairline`) in file order.
+  - **Value column:** `flex_1`, `min_w(0)`, `mono`, `13 px / 18 px`, `truncate()`, dimmed when the row is disabled.
     - Masked: capped at **12 dots** (`•` repeated `len.min(12)`), rendered in `fg.secondary` so rows stay calm and never overflow or leak exact long secret lengths.
     - Revealed: `fg.primary`, full value tooltip on hover.
     - Empty: `"empty"` in `fg.tertiary`.
   - **Actions column (`w(64 px)`, `flex_shrink_0`, `justify_end`, `gap(4 px)`):** `Copy` (`Copy`) and `Reveal/Hide` (`Eye` / `EyeOff`) `24 × 24 px` icon buttons. Visible when the row is selected (focused) or hovered.
   - **Tail action:** A quiet `+ Add key` ghost row (`32 px`, `fg.tertiary`) sits below the last key so the table finishes cleanly above open canvas space.
-  - **Inline editing (`Value`, `Rename`, `New`):** Renders inside the exact same `256 px` / `flex_1` / `64 px` column geometry with a monospace `Input` and no outer double-border.
+  - **Inline editing (`Value`, `Rename`, `New`):** Renders inside the exact same `276 px` / `flex_1` / `64 px` column geometry with a monospace `Input` and no outer double-border.
 
 ### 5.5 Two-Column Compare View
 - Replaces the key list area while keeping the file tab bar, toolbar, and footer intact. Edge-to-edge with no outer boxed outline.
@@ -204,10 +206,10 @@ Two font families only:
   - Col 3 (`w(56 px)`, `flex_shrink_0`): centered `12 px` `ArrowLeftRight` icon marking the copy gutter axis.
   - Col 4 (`flex_1`, `min_w(0)`, `h_flex`, `justify_between`, `items_center`): Right filename (mono, `12 px`, `fg.primary`, `R` badge) + compact outline `"→ Copy missing"` button (shown when left-only keys exist, tooltip `"Copy N missing into <right>"`).
 - **Compare rows (`32 px` fixed height, `mx(8 px)`, `px(7 px)` + `1 px` border = `16 px` inner edge, `rounded(6 px)`):**
-  - Col 1 (`w(256 px)`, `flex_shrink_0`, `pr(12 px)`, `h_flex`, `items_center`, `gap(8 px)`): fixed `14 px` container with `12 px` Lucide status icon (`Equal`, `EqualNot`, `Plus`, `Minus`) + mono key name (`13 px / 18 px`, `truncate()`, tooltip with full key).
-  - Col 2 (`flex_1`, `min_w(0)`, `pr(8 px)`): Left value (capped 12-dot mask, revealed text, or `—` in `fg.tertiary` when absent).
-  - Col 3 (`w(56 px)`, `flex_shrink_0`, `h_flex`, `items_center`, `justify_center`, `gap(2 px)`): One tidy centered copy gutter — single-direction rows (`OnlyLeft` `→`, `OnlyRight` `←`) center their `24 px` arrow button dead-center; `Different` rows render a tight centered pair `[→][←]`; `Same` rows remain empty.
-  - Col 4 (`flex_1`, `min_w(0)`, `pl(8 px)`): Right value (capped 12-dot mask, revealed text, or `—` in `fg.tertiary` when absent).
+  - Col 1 (`w(256 px)`, `flex_shrink_0`, `pr(12 px)`, `h_flex`, `items_center`, `gap(8 px)`): fixed `14 px` container with `12 px` Lucide status icon (`Equal`, `EqualNot`, `Plus`, `Minus`, or neutral `ToggleLeft` when a key is present but commented out/off — never flagged as missing) + mono key name (`13 px / 18 px`, `truncate()`, tooltip with full key).
+  - Col 2 (`flex_1`, `min_w(0)`, `pr(8 px)`): Left value (with neutral `off` micro-badge and dimmed text when disabled, capped 12-dot mask, revealed text, or `—` in `fg.tertiary` when absent).
+  - Col 3 (`w(56 px)`, `flex_shrink_0`, `h_flex`, `items_center`, `justify_center`, `gap(2 px)`): One tidy centered copy gutter — copying across preserves active/disabled state.
+  - Col 4 (`flex_1`, `min_w(0)`, `pl(8 px)`): Right value (with neutral `off` micro-badge and dimmed text when disabled).
   - Keyboard support: `↑`/`↓` moves the compare row cursor (with subtle `1 px` `accent.ring` highlight + scroll-into-view), `Space` reveals/hides that key's values on both sides, `A` reveals/hides all, `]` cycles the right file, `Esc` closes compare.
 
 ### 5.6 Footer / Status Bar
@@ -215,6 +217,7 @@ Two font families only:
 - **Left (`flex_1`, `min_w(0)`, `gap(8 px)`):**
   - Unsaved dot (`6 px` amber) when open file has unsaved edits.
   - Active transient status message (`11.5 px`, `fg.secondary`), or when idle, the short project-relative path (`project/relative/.env`, `11 px`, mono, `fg.tertiary`, `truncate()`, with full absolute path in the hover tooltip).
+  - Neutral clickable unreadable-lines note (shown only when the open file has lines that are neither comment, blank, nor assignment): e.g. `"2 lines Envy can't read"` (`bg.kbd`, `border.hairline`, `fg.secondary`, zero red/warning styling). Opens a read-only modal listing exact 1-based line numbers and raw lines.
 - **Right (`flex_shrink_0`, `gap(12 px)`):**
   - 3–4 context-sensitive shortcut hints composed of a micro keycap (`bg.kbd`, `1 px` `border.control`, `rounded(4 px)`, `px(5 px)`, `py(1 px)`, `10 px` mono, `fg.secondary`) + short label (`11 px`, `fg.tertiary`).
 

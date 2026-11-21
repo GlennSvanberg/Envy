@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use envy_core::discover::{
     default_file_index, is_example_filename, is_prod_filename, resolve_file, resolve_project,
 };
-use envy_core::document::Node;
+use envy_core::document::{LayoutItem, Node, UnreadableLine};
 use envy_core::paste::{PasteChange, PastePlan};
 use envy_core::{
     attach_git_identity, cache_from_projects, diff, fill_key_index, from_example, is_env_key,
@@ -39,8 +39,9 @@ use crate::hotkey_os;
 use crate::instance::Instance;
 use crate::theme::{
     self, Palette, COL_HEADER_H, DIFF_GUTTER_W, DIFF_HEADER_H, DIFF_KEY_COL_W, DIFF_ROW_H,
-    FOOTER_H, KEY_ACTIONS_W, KEY_COL_W, KEY_ROW_H, MASK_MAX_DOTS, SIDEBAR_HEADER_H,
-    SIDEBAR_ROW_BRANCH_H, SIDEBAR_ROW_COMPACT_H, SIDEBAR_W, TAB_BAR_H, TITLE_BAR_H, TOOLBAR_H,
+    FOOTER_H, KEY_ACTIONS_W, KEY_COL_W, KEY_ROW_DESC_H, KEY_ROW_H, MASK_MAX_DOTS, SECTION_ROW_H,
+    SIDEBAR_HEADER_H, SIDEBAR_ROW_BRANCH_H, SIDEBAR_ROW_COMPACT_H, SIDEBAR_W, TAB_BAR_H,
+    TITLE_BAR_H, TOOLBAR_H,
 };
 
 const CLEAR_AFTER: Duration = Duration::from_secs(30);
@@ -77,6 +78,13 @@ enum Overlay {
     AddFolder,
     Paste(PastePlan),
     Shortcuts,
+    Unreadable,
+}
+
+struct VisibleLayout {
+    items: Vec<LayoutItem>,
+    entry_positions: Vec<usize>,
+    entry_nodes: Vec<usize>,
 }
 
 pub struct EnvyApp {
@@ -604,6 +612,7 @@ impl EnvyApp {
                     path: file.path,
                     name: file.name,
                     keys: Vec::new(),
+                    active_keys: Vec::new(),
                     prod,
                     missing_vs_example: false,
                 },
@@ -668,22 +677,71 @@ impl EnvyApp {
             .unwrap_or_default()
     }
 
-    fn visible_entry_nodes(&self) -> Vec<usize> {
-        let nodes = self.entry_nodes();
-        let query = self.key_query.trim().to_ascii_lowercase();
-        if query.is_empty() {
-            return nodes;
-        }
+    fn visible_layout(&self) -> VisibleLayout {
         let Some(open) = &self.open else {
-            return nodes;
+            return VisibleLayout {
+                items: Vec::new(),
+                entry_positions: Vec::new(),
+                entry_nodes: Vec::new(),
+            };
         };
-        nodes
-            .into_iter()
-            .filter(|node| match open.document.nodes.get(*node) {
-                Some(Node::Entry(entry)) => fuzzy_hit(&entry.key, &query),
-                _ => false,
-            })
-            .collect()
+        let layout = open.document.layout();
+        let query = self.key_query.trim().to_ascii_lowercase();
+        let mut items = Vec::with_capacity(layout.items.len());
+        let mut entry_positions = Vec::new();
+        let mut entry_nodes = Vec::new();
+
+        if query.is_empty() {
+            for item in layout.items {
+                if let LayoutItem::Entry { node_index, .. } = &item {
+                    entry_positions.push(items.len());
+                    entry_nodes.push(*node_index);
+                }
+                items.push(item);
+            }
+        } else {
+            let mut pending_section: Option<LayoutItem> = None;
+            for item in layout.items {
+                match item {
+                    LayoutItem::Section { .. } => {
+                        pending_section = Some(item);
+                    }
+                    LayoutItem::Entry {
+                        node_index,
+                        ref description,
+                        ..
+                    } => {
+                        let matched = match open.document.nodes.get(node_index) {
+                            Some(Node::Entry(entry)) => {
+                                fuzzy_hit(&entry.key, &query)
+                                    || description
+                                        .as_deref()
+                                        .is_some_and(|desc| fuzzy_hit(desc, &query))
+                            }
+                            _ => false,
+                        };
+                        if matched {
+                            if let Some(section) = pending_section.take() {
+                                items.push(section);
+                            }
+                            entry_positions.push(items.len());
+                            entry_nodes.push(node_index);
+                            items.push(item);
+                        }
+                    }
+                }
+            }
+        }
+
+        VisibleLayout {
+            items,
+            entry_positions,
+            entry_nodes,
+        }
+    }
+
+    fn visible_entry_nodes(&self) -> Vec<usize> {
+        self.visible_layout().entry_nodes
     }
 
     fn selected_node(&self) -> Option<usize> {
@@ -1512,12 +1570,14 @@ impl EnvyApp {
             return;
         };
         let keys = open.document.key_names();
+        let active_keys = open.document.active_key_names();
         let path = open.path.clone();
         let Some(project) = self.project_ix.and_then(|ix| self.projects.get_mut(ix)) else {
             return;
         };
         if let Some(file) = project.files.iter_mut().find(|file| file.path == path) {
             file.keys = keys;
+            file.active_keys = active_keys;
         }
         recompute_missing(project);
     }
@@ -1550,19 +1610,23 @@ impl EnvyApp {
     }
 
     fn jump_to_key(&mut self, key: &str) {
-        let nodes = self.entry_nodes();
+        let layout = self.visible_layout();
         let Some(open) = &self.open else {
             return;
         };
-        if let Some(position) = nodes
-            .iter()
-            .position(|node| match open.document.nodes.get(*node) {
-                Some(Node::Entry(entry)) => entry.key == key,
-                _ => false,
-            })
+        if let Some(position) =
+            layout
+                .entry_nodes
+                .iter()
+                .position(|node| match open.document.nodes.get(*node) {
+                    Some(Node::Entry(entry)) => entry.key == key,
+                    _ => false,
+                })
         {
             self.cursor = position;
-            self.key_scroll.scroll_to_item(position);
+            if let Some(&item_ix) = layout.entry_positions.get(position) {
+                self.key_scroll.scroll_to_item(item_ix);
+            }
             self.zone = Zone::Keys;
         }
     }
@@ -1611,7 +1675,8 @@ impl EnvyApp {
                 cx.notify();
             }
             Zone::Keys => {
-                let len = self.visible_entry_nodes().len() as isize;
+                let layout = self.visible_layout();
+                let len = layout.entry_nodes.len() as isize;
                 if len == 0 {
                     if delta < 0 {
                         self.focus_search(window, cx);
@@ -1624,7 +1689,9 @@ impl EnvyApp {
                 }
                 let next = (self.cursor as isize + delta).clamp(0, len - 1) as usize;
                 self.cursor = next;
-                self.key_scroll.scroll_to_item(next);
+                if let Some(&item_ix) = layout.entry_positions.get(next) {
+                    self.key_scroll.scroll_to_item(item_ix);
+                }
                 cx.notify();
             }
         }
@@ -1648,7 +1715,7 @@ impl EnvyApp {
                 self.apply_overlay_paste(window, cx);
                 return;
             }
-            Overlay::Shortcuts => {
+            Overlay::Shortcuts | Overlay::Unreadable => {
                 self.close_overlay(window, cx);
                 return;
             }
@@ -2079,6 +2146,52 @@ impl EnvyApp {
             "Showing all values.".into()
         } else {
             "Values hidden.".into()
+        };
+        cx.notify();
+    }
+
+    fn toggle_disabled_selected(&mut self, cx: &mut Context<Self>) {
+        if self.diff_open {
+            return;
+        }
+        let Some(node) = self.selected_node() else {
+            return;
+        };
+        self.toggle_disabled_node(node, cx);
+    }
+
+    fn toggle_disabled_node(&mut self, node: usize, cx: &mut Context<Self>) {
+        let key = match self
+            .open
+            .as_ref()
+            .and_then(|open| open.document.nodes.get(node))
+        {
+            Some(Node::Entry(entry)) => entry.key.clone(),
+            _ => return,
+        };
+        let Some(open) = self.open.as_mut() else {
+            return;
+        };
+        let mut now_disabled = None;
+        open.mutate(|document| {
+            now_disabled = document.toggle_disabled_at(node);
+        });
+        let Some(disabled) = now_disabled else {
+            return;
+        };
+        // Keep selection on the toggled row even if pairing moved its visual position.
+        if let Some(pos) = self
+            .visible_entry_nodes()
+            .iter()
+            .position(|&candidate| candidate == node)
+        {
+            self.cursor = pos;
+        }
+        self.mark_edited();
+        self.status = if disabled {
+            format!("Turned off {key}. Ctrl+S saves.")
+        } else {
+            format!("Turned on {key}. Ctrl+S saves.")
         };
         cx.notify();
     }
@@ -2522,7 +2635,7 @@ impl EnvyApp {
             return Vec::new();
         };
         example
-            .keys
+            .active_keys
             .iter()
             .filter(|key| !file.keys.iter().any(|have| have == *key))
             .cloned()
@@ -2556,7 +2669,7 @@ fn recompute_missing(project: &mut Project) {
         .files
         .iter()
         .find(|file| is_example_filename(&file.name))
-        .map(|file| file.keys.clone());
+        .map(|file| file.active_keys.clone());
     let Some(example) = example else {
         for file in &mut project.files {
             file.missing_vs_example = false;
@@ -2611,11 +2724,9 @@ fn block_paste(
     }
 }
 
-fn write_pairs(document: &mut EnvDocument, pairs: &[(String, String)]) {
-    for (key, value) in pairs {
-        if document.set_value(key, value) == 0 {
-            document.push_entry(key.clone(), value.clone());
-        }
+fn write_entries(document: &mut EnvDocument, entries: &[(String, String, bool)]) {
+    for (key, value, disabled) in entries {
+        document.upsert_entry(key.clone(), value.clone(), *disabled);
     }
 }
 
@@ -2681,7 +2792,7 @@ impl Render for EnvyApp {
             self.render_empty_state(p, mono.clone(), cx)
         } else if self.open.is_none() && !self.diff_open {
             let tabs = self.render_tabs(p, mono.clone(), cx);
-            let footer = self.render_footer(p, mono.clone());
+            let footer = self.render_footer(p, mono.clone(), cx);
             v_flex()
                 .flex_1()
                 .h_full()
@@ -2713,7 +2824,7 @@ impl Render for EnvyApp {
             } else {
                 self.render_key_table(p, mono.clone(), window, cx)
             };
-            let footer = self.render_footer(p, mono.clone());
+            let footer = self.render_footer(p, mono.clone(), cx);
             v_flex()
                 .flex_1()
                 .h_full()
@@ -2760,6 +2871,9 @@ impl Render for EnvyApp {
             .on_action(cx.listener(|this, _: &CopyValue, _, cx| this.copy_selected(cx)))
             .on_action(cx.listener(|this, _: &ToggleReveal, _, cx| this.toggle_reveal(cx)))
             .on_action(cx.listener(|this, _: &RevealAll, _, cx| this.toggle_show_all(cx)))
+            .on_action(cx.listener(|this, _: &ToggleComment, _, cx| {
+                this.toggle_disabled_selected(cx);
+            }))
             .on_action(cx.listener(|this, _: &NewKey, window, cx| this.begin_new_key(window, cx)))
             .on_action(cx.listener(|this, _: &RenameKey, window, cx| this.begin_rename(window, cx)))
             .on_action(cx.listener(|this, _: &DeleteKey, window, cx| this.ask_delete(window, cx)))
@@ -3435,15 +3549,17 @@ impl EnvyApp {
                 let mut different = 0usize;
                 let mut only_left = 0usize;
                 let mut only_right = 0usize;
+                let mut disabled = 0usize;
                 for row in &report.rows {
                     match row.kind {
                         diff::DiffKind::Different => different += 1,
                         diff::DiffKind::OnlyLeft => only_left += 1,
                         diff::DiffKind::OnlyRight => only_right += 1,
+                        diff::DiffKind::Disabled => disabled += 1,
                         diff::DiffKind::Same => {}
                     }
                 }
-                if different == 0 && only_left == 0 && only_right == 0 {
+                if different == 0 && only_left == 0 && only_right == 0 && disabled == 0 {
                     left = left.child(neutral_summary_chip(
                         IconName::Check,
                         p.accent,
@@ -3472,6 +3588,14 @@ impl EnvyApp {
                             IconName::Minus,
                             p.danger,
                             format!("{only_right} right only"),
+                            p,
+                        ));
+                    }
+                    if disabled > 0 {
+                        left = left.child(neutral_summary_chip(
+                            IconName::ToggleLeft,
+                            p.fg_tertiary,
+                            format!("{disabled} off"),
                             p,
                         ));
                     }
@@ -3746,7 +3870,7 @@ impl EnvyApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
-        let nodes = self.visible_entry_nodes();
+        let visible_layout = self.visible_layout();
         let cursor = self.cursor;
         let show_all = self.show_all;
         let revealed = self.revealed.clone();
@@ -3756,24 +3880,11 @@ impl EnvyApp {
             .editor
             .as_ref()
             .is_some_and(|editor| matches!(editor.kind, EditKind::New));
-        let query_active = !self.key_query.trim().is_empty();
+        let query = self.key_query.trim().to_ascii_lowercase();
+        let query_active = !query.is_empty();
         let entity = cx.entity();
 
-        let rows_src: Vec<(usize, String, String, bool)> = nodes
-            .iter()
-            .filter_map(|node| {
-                let open = self.open.as_ref()?;
-                match open.document.nodes.get(*node)? {
-                    Node::Entry(entry) => Some((
-                        *node,
-                        entry.key.clone(),
-                        entry.value.clone(),
-                        entry.exported,
-                    )),
-                    Node::Verbatim(_) => None,
-                }
-            })
-            .collect();
+        let has_any_entries = !visible_layout.entry_nodes.is_empty();
 
         let col_header = h_flex()
             .h(COL_HEADER_H)
@@ -3787,6 +3898,7 @@ impl EnvyApp {
                 div()
                     .w(KEY_COL_W)
                     .flex_shrink_0()
+                    .pl(px(26.))
                     .pr(px(16.))
                     .text_size(px(11.))
                     .line_height(px(14.))
@@ -3814,7 +3926,7 @@ impl EnvyApp {
             .overflow_y_scroll()
             .track_scroll(&self.key_scroll);
 
-        if rows_src.is_empty() && !editing_new && self.open.is_some() {
+        if !has_any_entries && !editing_new && self.open.is_some() {
             let note = if query_active {
                 "No matching keys."
             } else {
@@ -3831,223 +3943,384 @@ impl EnvyApp {
             );
         }
 
-        for (row_ix, (node, key, value, exported)) in rows_src.iter().enumerate() {
-            let selected = cursor == row_ix;
-            let visible = show_all || revealed.contains(key);
-            let click_entity = entity.clone();
-            let copy_entity = entity.clone();
-            let reveal_entity = entity.clone();
-            let key_group = SharedString::from(format!("key-row-{node}"));
-
-            let show_value_input = editing_node == Some(*node)
-                && self
-                    .editor
-                    .as_ref()
-                    .is_some_and(|editor| matches!(editor.kind, EditKind::Value));
-            let show_rename_input = editing_node == Some(*node)
-                && self
-                    .editor
-                    .as_ref()
-                    .is_some_and(|editor| matches!(editor.kind, EditKind::Rename));
-            let editing_this = show_value_input || show_rename_input;
-
-            let row_bg = if editing_this || (selected && keys_focused) {
-                Some(p.bg_selected_accent)
-            } else if selected {
-                Some(p.bg_selected_muted)
-            } else {
-                None
-            };
-
-            let mut row = h_flex()
-                .id(SharedString::from(format!("key-{node}")))
-                .group(key_group.clone())
-                .mx(px(8.))
-                .px(px(7.))
-                .h(if editing_this { px(36.) } else { KEY_ROW_H })
-                .flex_shrink_0()
-                .rounded(px(6.))
-                .border_1()
-                .border_color(if selected && keys_focused && !editing_this {
-                    p.accent_ring
-                } else {
-                    p.bg_canvas.opacity(0.)
-                })
-                .items_center()
-                .overflow_hidden()
-                .cursor_pointer()
-                .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-                    click_entity.update(cx, |this, cx| {
-                        this.zone = Zone::Keys;
-                        this.cursor = row_ix;
-                        if event.click_count >= 2 {
-                            this.begin_value_edit(window, cx);
-                        } else {
-                            this.focus_self(window, cx);
-                            cx.notify();
-                        }
-                    });
-                });
-
-            if let Some(bg) = row_bg {
-                row = row.bg(bg);
-            } else {
-                row = row.hover(move |style| style.bg(p.bg_hover));
-            }
-
-            let key_color = if query_active { p.accent } else { p.fg_primary };
-            let full_key_tip = if *exported {
-                format!("export {key}")
-            } else {
-                key.clone()
-            };
-
-            let key_cell = if show_rename_input {
-                if let Some(key_input) = self.editor.as_ref().and_then(|e| e.key.as_ref()) {
-                    div()
-                        .w(KEY_COL_W)
+        let mut entry_row_ix = 0usize;
+        for (item_ix, item) in visible_layout.items.iter().enumerate() {
+            match item {
+                LayoutItem::Section { title, .. } => {
+                    let divider = h_flex()
+                        .id(SharedString::from(format!("section-{item_ix}")))
+                        .h(SECTION_ROW_H)
                         .flex_shrink_0()
-                        .pr(px(12.))
-                        .font_family(mono.clone())
-                        .child(Input::new(key_input).small())
-                        .into_any_element()
-                } else {
-                    div().w(KEY_COL_W).flex_shrink_0().into_any_element()
-                }
-            } else {
-                let mut cell = h_flex()
-                    .id(SharedString::from(format!("key-name-{node}")))
-                    .w(KEY_COL_W)
-                    .flex_shrink_0()
-                    .pr(px(16.))
-                    .min_w(px(0.))
-                    .items_center()
-                    .font_family(mono.clone())
-                    .text_size(px(13.))
-                    .line_height(px(18.))
-                    .tooltip(hover_tip(full_key_tip));
-                if *exported {
-                    cell = cell.child(
-                        div()
-                            .flex_shrink_0()
-                            .text_color(p.fg_tertiary)
-                            .child("export "),
-                    );
-                }
-                cell.child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .truncate()
-                        .text_color(key_color)
-                        .child(key.clone()),
-                )
-                .into_any_element()
-            };
-
-            let value_cell = if show_value_input {
-                if let Some(editor) = &self.editor {
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .pr(px(8.))
-                        .font_family(mono.clone())
+                        .mx(px(16.))
+                        .when(item_ix > 0, |row| row.mt(px(8.)))
+                        .items_center()
+                        .gap(px(10.))
+                        .tooltip(hover_tip(title.clone()))
                         .child(
-                            Input::new(&editor.value)
-                                .small()
-                                .on_paste(block_paste(cx.entity().downgrade(), self.focus.clone())),
+                            div()
+                                .max_w(px(360.))
+                                .text_size(px(11.))
+                                .line_height(px(14.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(p.fg_tertiary)
+                                .truncate()
+                                .child(title.clone()),
                         )
-                        .into_any_element()
-                } else {
-                    div().flex_1().into_any_element()
+                        .child(div().flex_1().h(px(1.)).bg(p.border_hairline));
+                    table = table.child(divider);
                 }
-            } else {
-                let shown = display_value(value, visible);
-                let dim_empty = value.is_empty();
-                let value_color = if dim_empty {
-                    p.fg_tertiary
-                } else if visible {
-                    p.fg_primary
-                } else {
-                    p.fg_secondary
-                };
-                let value_tip = if visible && !dim_empty {
-                    value.clone()
-                } else {
-                    String::new()
-                };
-                div()
-                    .id(SharedString::from(format!("key-value-{node}")))
-                    .flex_1()
-                    .min_w(px(0.))
-                    .pr(px(8.))
-                    .font_family(mono.clone())
-                    .text_size(px(13.))
-                    .line_height(px(18.))
-                    .truncate()
-                    .text_color(value_color)
-                    .when(!value_tip.is_empty(), |cell| {
-                        cell.tooltip(hover_tip(value_tip))
-                    })
-                    .child(shown)
-                    .into_any_element()
-            };
+                LayoutItem::Entry {
+                    node_index,
+                    description,
+                    related_to_active,
+                    ..
+                } => {
+                    let Some(open) = self.open.as_ref() else {
+                        continue;
+                    };
+                    let Some(Node::Entry(entry)) = open.document.nodes.get(*node_index) else {
+                        continue;
+                    };
+                    let row_ix = entry_row_ix;
+                    entry_row_ix += 1;
 
-            let mut actions = h_flex()
-                .w(KEY_ACTIONS_W)
-                .gap(px(4.))
-                .flex_shrink_0()
-                .items_center()
-                .justify_end();
-            if !selected || !keys_focused {
-                actions = actions
-                    .invisible()
-                    .group_hover(key_group, |style| style.visible());
-            }
-            if !editing_this {
-                actions = actions
-                    .child(
-                        row_icon_button(
-                            SharedString::from(format!("copy-{node}")),
-                            IconName::Copy,
-                            "Copy value · C",
-                        )
-                        .text_color(p.fg_secondary)
-                        .on_click(move |_, _, cx| {
-                            copy_entity.update(cx, |this, cx| {
+                    let node = *node_index;
+                    let key = entry.key.clone();
+                    let value = entry.value.clone();
+                    let exported = entry.exported;
+                    let disabled = entry.disabled;
+                    let related = *related_to_active;
+                    let has_desc = description.is_some();
+
+                    let selected = cursor == row_ix;
+                    let visible = show_all || revealed.contains(&key);
+                    let click_entity = entity.clone();
+                    let toggle_entity = entity.clone();
+                    let copy_entity = entity.clone();
+                    let reveal_entity = entity.clone();
+                    let key_group = SharedString::from(format!("key-row-{node}"));
+
+                    let show_value_input = editing_node == Some(node)
+                        && self
+                            .editor
+                            .as_ref()
+                            .is_some_and(|editor| matches!(editor.kind, EditKind::Value));
+                    let show_rename_input = editing_node == Some(node)
+                        && self
+                            .editor
+                            .as_ref()
+                            .is_some_and(|editor| matches!(editor.kind, EditKind::Rename));
+                    let editing_this = show_value_input || show_rename_input;
+
+                    let row_bg = if editing_this || (selected && keys_focused) {
+                        Some(p.bg_selected_accent)
+                    } else if selected {
+                        Some(p.bg_selected_muted)
+                    } else {
+                        None
+                    };
+
+                    let row_h = if editing_this {
+                        if has_desc {
+                            px(46.)
+                        } else {
+                            px(36.)
+                        }
+                    } else if has_desc {
+                        KEY_ROW_DESC_H
+                    } else {
+                        KEY_ROW_H
+                    };
+
+                    let mut row = h_flex()
+                        .id(SharedString::from(format!("key-{node}")))
+                        .group(key_group.clone())
+                        .mx(px(8.))
+                        .px(px(7.))
+                        .h(row_h)
+                        .flex_shrink_0()
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(if selected && keys_focused && !editing_this {
+                            p.accent_ring
+                        } else {
+                            p.bg_canvas.opacity(0.)
+                        })
+                        .items_center()
+                        .overflow_hidden()
+                        .cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                            click_entity.update(cx, |this, cx| {
                                 this.zone = Zone::Keys;
                                 this.cursor = row_ix;
-                                this.copy_selected(cx);
+                                if event.click_count >= 2 {
+                                    this.begin_value_edit(window, cx);
+                                } else {
+                                    this.focus_self(window, cx);
+                                    cx.notify();
+                                }
                             });
-                        }),
-                    )
-                    .child(
-                        row_icon_button(
-                            SharedString::from(format!("eye-{node}")),
-                            if visible {
-                                IconName::EyeOff
-                            } else {
-                                IconName::Eye
-                            },
-                            if visible {
-                                "Hide value · Space"
-                            } else {
-                                "Show value · Space"
-                            },
-                        )
-                        .text_color(if visible { p.accent } else { p.fg_secondary })
-                        .on_click(move |_, _, cx| {
-                            reveal_entity.update(cx, |this, cx| {
-                                this.zone = Zone::Keys;
-                                this.cursor = row_ix;
-                                this.toggle_reveal(cx);
-                            });
-                        }),
-                    );
-            }
+                        });
 
-            row = row.child(key_cell).child(value_cell).child(actions);
-            table = table.child(row);
+                    if let Some(bg) = row_bg {
+                        row = row.bg(bg);
+                    } else {
+                        row = row.hover(move |style| style.bg(p.bg_hover));
+                    }
+
+                    let key_hit = query_active && fuzzy_hit(&key, &query);
+                    let desc_hit = query_active
+                        && description.as_deref().is_some_and(|d| fuzzy_hit(d, &query));
+                    let key_color = if disabled {
+                        if key_hit {
+                            p.accent.opacity(0.75)
+                        } else {
+                            p.fg_tertiary
+                        }
+                    } else if key_hit {
+                        p.accent
+                    } else {
+                        p.fg_primary
+                    };
+
+                    let mut full_key_tip = if exported {
+                        format!("export {key}")
+                    } else {
+                        key.clone()
+                    };
+                    if disabled {
+                        full_key_tip.push_str(" (off)");
+                    }
+                    if let Some(desc) = description {
+                        full_key_tip.push('\n');
+                        full_key_tip.push_str(desc);
+                    }
+
+                    let toggle_btn = div()
+                        .id(SharedString::from(format!("toggle-{node}")))
+                        .w(px(20.))
+                        .h(px(20.))
+                        .flex_shrink_0()
+                        .rounded(px(4.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .tooltip(hover_tip(if disabled {
+                            "Turn on · Ctrl+/"
+                        } else {
+                            "Turn off · Ctrl+/"
+                        }))
+                        .hover(move |style| style.bg(p.bg_hover))
+                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                            cx.stop_propagation();
+                            toggle_entity.update(cx, |this, cx| {
+                                this.zone = Zone::Keys;
+                                this.toggle_disabled_node(node, cx);
+                            });
+                        })
+                        .child(
+                            Icon::new(if disabled {
+                                IconName::ToggleLeft
+                            } else {
+                                IconName::ToggleRight
+                            })
+                            .size(px(14.))
+                            .text_color(if disabled {
+                                p.fg_tertiary.opacity(0.65)
+                            } else if selected && keys_focused {
+                                p.accent
+                            } else {
+                                p.accent.opacity(0.62)
+                            }),
+                        );
+
+                    let key_cell = if show_rename_input {
+                        if let Some(key_input) = self.editor.as_ref().and_then(|e| e.key.as_ref()) {
+                            div()
+                                .w(KEY_COL_W)
+                                .flex_shrink_0()
+                                .pr(px(12.))
+                                .font_family(mono.clone())
+                                .child(Input::new(key_input).small())
+                                .into_any_element()
+                        } else {
+                            div().w(KEY_COL_W).flex_shrink_0().into_any_element()
+                        }
+                    } else {
+                        let mut key_line = h_flex()
+                            .min_w(px(0.))
+                            .items_center()
+                            .font_family(mono.clone())
+                            .text_size(px(13.))
+                            .line_height(px(18.));
+                        if exported {
+                            key_line = key_line.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_color(p.fg_tertiary)
+                                    .child("export "),
+                            );
+                        }
+                        key_line = key_line.child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_color(key_color)
+                                .child(key.clone()),
+                        );
+
+                        let mut text_col =
+                            v_flex().flex_1().min_w(px(0.)).gap(px(1.)).child(key_line);
+                        if let Some(desc) = description {
+                            let one_line = desc.replace('\n', " · ");
+                            text_col = text_col.child(
+                                div()
+                                    .min_w(px(0.))
+                                    .text_size(px(11.))
+                                    .line_height(px(14.))
+                                    .truncate()
+                                    .text_color(if desc_hit {
+                                        p.accent.opacity(0.85)
+                                    } else {
+                                        p.fg_tertiary
+                                    })
+                                    .child(one_line),
+                            );
+                        }
+
+                        let mut cell = h_flex()
+                            .id(SharedString::from(format!("key-name-{node}")))
+                            .w(KEY_COL_W)
+                            .flex_shrink_0()
+                            .pr(px(14.))
+                            .min_w(px(0.))
+                            .gap(px(6.))
+                            .items_center()
+                            .tooltip(hover_tip(full_key_tip));
+                        if related {
+                            cell = cell.pl(px(10.)).child(
+                                Icon::new(IconName::CornerDownRight)
+                                    .size(px(11.))
+                                    .text_color(p.fg_tertiary.opacity(0.65)),
+                            );
+                        }
+                        cell.child(toggle_btn).child(text_col).into_any_element()
+                    };
+
+                    let value_cell = if show_value_input {
+                        if let Some(editor) = &self.editor {
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .pr(px(8.))
+                                .font_family(mono.clone())
+                                .child(Input::new(&editor.value).small().on_paste(block_paste(
+                                    cx.entity().downgrade(),
+                                    self.focus.clone(),
+                                )))
+                                .into_any_element()
+                        } else {
+                            div().flex_1().into_any_element()
+                        }
+                    } else {
+                        let shown = display_value(&value, visible);
+                        let dim_empty = value.is_empty();
+                        let value_color = if disabled {
+                            if dim_empty {
+                                p.fg_tertiary.opacity(0.55)
+                            } else if visible {
+                                p.fg_tertiary
+                            } else {
+                                p.fg_tertiary.opacity(0.75)
+                            }
+                        } else if dim_empty {
+                            p.fg_tertiary
+                        } else if visible {
+                            p.fg_primary
+                        } else {
+                            p.fg_secondary
+                        };
+                        let value_tip = if visible && !dim_empty {
+                            value.clone()
+                        } else {
+                            String::new()
+                        };
+                        div()
+                            .id(SharedString::from(format!("key-value-{node}")))
+                            .flex_1()
+                            .min_w(px(0.))
+                            .pr(px(8.))
+                            .font_family(mono.clone())
+                            .text_size(px(13.))
+                            .line_height(px(18.))
+                            .truncate()
+                            .text_color(value_color)
+                            .when(!value_tip.is_empty(), |cell| {
+                                cell.tooltip(hover_tip(value_tip))
+                            })
+                            .child(shown)
+                            .into_any_element()
+                    };
+
+                    let mut actions = h_flex()
+                        .w(KEY_ACTIONS_W)
+                        .gap(px(4.))
+                        .flex_shrink_0()
+                        .items_center()
+                        .justify_end();
+                    if !selected || !keys_focused {
+                        actions = actions
+                            .invisible()
+                            .group_hover(key_group, |style| style.visible());
+                    }
+                    if !editing_this {
+                        actions = actions
+                            .child(
+                                row_icon_button(
+                                    SharedString::from(format!("copy-{node}")),
+                                    IconName::Copy,
+                                    "Copy value · C",
+                                )
+                                .text_color(p.fg_secondary)
+                                .on_click(move |_, _, cx| {
+                                    copy_entity.update(cx, |this, cx| {
+                                        this.zone = Zone::Keys;
+                                        this.cursor = row_ix;
+                                        this.copy_selected(cx);
+                                    });
+                                }),
+                            )
+                            .child(
+                                row_icon_button(
+                                    SharedString::from(format!("eye-{node}")),
+                                    if visible {
+                                        IconName::EyeOff
+                                    } else {
+                                        IconName::Eye
+                                    },
+                                    if visible {
+                                        "Hide value · Space"
+                                    } else {
+                                        "Show value · Space"
+                                    },
+                                )
+                                .text_color(if visible { p.accent } else { p.fg_secondary })
+                                .on_click(move |_, _, cx| {
+                                    reveal_entity.update(cx, |this, cx| {
+                                        this.zone = Zone::Keys;
+                                        this.cursor = row_ix;
+                                        this.toggle_reveal(cx);
+                                    });
+                                }),
+                            );
+                    }
+
+                    row = row.child(key_cell).child(value_cell).child(actions);
+                    table = table.child(row);
+                }
+            }
         }
 
         if editing_new {
@@ -4094,7 +4367,7 @@ impl EnvyApp {
                     );
                 table = table.child(row);
             }
-        } else if self.open.is_some() && (!rows_src.is_empty() || !query_active) {
+        } else if self.open.is_some() && (has_any_entries || !query_active) {
             let add_entity = entity.clone();
             table = table.child(
                 h_flex()
@@ -4226,10 +4499,20 @@ impl EnvyApp {
         (short, full)
     }
 
-    fn render_footer(&self, p: Palette, mono: SharedString) -> gpui_kit::Div {
+    fn render_footer(
+        &self,
+        p: Palette,
+        mono: SharedString,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
         let (path_short, path_full) = self.short_project_path();
         let status = self.status.clone();
         let dirty = self.open.as_ref().is_some_and(|open| open.is_dirty());
+        let unreadable_count = self
+            .open
+            .as_ref()
+            .map(|open| open.document.unreadable_lines().len())
+            .unwrap_or(0);
 
         let mut left = h_flex().flex_1().min_w(px(0.)).items_center().gap(px(8.));
         if dirty {
@@ -4246,7 +4529,6 @@ impl EnvyApp {
         if !status.is_empty() {
             left = left.child(
                 div()
-                    .flex_1()
                     .min_w(px(0.))
                     .text_size(px(11.5))
                     .line_height(px(16.))
@@ -4258,7 +4540,6 @@ impl EnvyApp {
             left = left.child(
                 div()
                     .id("footer-path")
-                    .flex_1()
                     .min_w(px(0.))
                     .font_family(mono.clone())
                     .text_size(px(11.))
@@ -4267,6 +4548,39 @@ impl EnvyApp {
                     .truncate()
                     .tooltip(hover_tip(path_full))
                     .child(path_short),
+            );
+        }
+        if unreadable_count > 0 && !self.diff_open {
+            let entity = cx.entity();
+            let note = if unreadable_count == 1 {
+                "1 line Envy can't read".to_string()
+            } else {
+                format!("{unreadable_count} lines Envy can't read")
+            };
+            left = left.child(
+                h_flex()
+                    .id("footer-unreadable")
+                    .h(px(20.))
+                    .px(px(6.))
+                    .flex_shrink_0()
+                    .items_center()
+                    .rounded(px(4.))
+                    .bg(p.bg_kbd)
+                    .border_1()
+                    .border_color(p.border_hairline)
+                    .text_size(px(11.))
+                    .line_height(px(14.))
+                    .text_color(p.fg_secondary)
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(p.bg_hover).text_color(p.fg_primary))
+                    .tooltip(hover_tip("View lines Envy can't read"))
+                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.overlay = Overlay::Unreadable;
+                            cx.notify();
+                        });
+                    })
+                    .child(note),
             );
         }
 
@@ -4295,8 +4609,8 @@ impl EnvyApp {
                 Zone::Keys => &[
                     ("↑↓", "Move"),
                     ("Enter", "Edit"),
+                    ("Ctrl+/", "Toggle"),
                     ("Space", "Reveal"),
-                    ("C", "Copy"),
                     ("?", "Shortcuts"),
                 ],
             }
@@ -4619,6 +4933,7 @@ impl EnvyApp {
                 diff::DiffKind::OnlyRight => {
                     (IconName::Minus, p.danger, Some(p.diff_only_right_bg))
                 }
+                diff::DiffKind::Disabled => (IconName::ToggleLeft, p.fg_tertiary, None),
             };
             let selected = keys_focused && self.diff_cursor == index;
             let shown = self.visible(&row.key);
@@ -4636,6 +4951,8 @@ impl EnvyApp {
                 .unwrap_or_else(|| "—".into());
             let left_color = if row.left.is_none() {
                 p.fg_tertiary.opacity(0.6)
+            } else if row.left_disabled {
+                p.fg_tertiary
             } else if left_empty {
                 p.fg_tertiary
             } else if shown {
@@ -4645,6 +4962,8 @@ impl EnvyApp {
             };
             let right_color = if row.right.is_none() {
                 p.fg_tertiary.opacity(0.6)
+            } else if row.right_disabled {
+                p.fg_tertiary
             } else if right_empty {
                 p.fg_tertiary
             } else if shown {
@@ -4721,24 +5040,36 @@ impl EnvyApp {
                         .text_size(px(13.))
                         .line_height(px(18.))
                         .truncate()
-                        .text_color(if row.kind == diff::DiffKind::Same {
-                            p.fg_secondary
-                        } else {
-                            p.fg_primary
-                        })
+                        .text_color(
+                            if matches!(row.kind, diff::DiffKind::Same | diff::DiffKind::Disabled) {
+                                p.fg_secondary
+                            } else {
+                                p.fg_primary
+                            },
+                        )
                         .child(row.key.clone()),
                 );
 
-            let left_col = div()
+            let mut left_col = h_flex()
                 .flex_1()
                 .min_w(px(0.))
                 .pr(px(8.))
-                .font_family(mono.clone())
-                .text_size(px(13.))
-                .line_height(px(18.))
-                .truncate()
-                .text_color(left_color)
-                .child(left_text);
+                .gap(px(6.))
+                .items_center();
+            if row.left_disabled {
+                left_col = left_col.child(off_badge(p));
+            }
+            left_col = left_col.child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .font_family(mono.clone())
+                    .text_size(px(13.))
+                    .line_height(px(18.))
+                    .truncate()
+                    .text_color(left_color)
+                    .child(left_text),
+            );
 
             let mut gutter = h_flex()
                 .w(DIFF_GUTTER_W)
@@ -4748,11 +5079,16 @@ impl EnvyApp {
                 .justify_center();
 
             if can_copy_right {
+                let tip = if row.left_disabled {
+                    format!("Copy to {right_name} (off)")
+                } else {
+                    format!("Copy to {right_name}")
+                };
                 gutter = gutter.child(
                     row_icon_button(
                         SharedString::from(format!("diff-to-right-{index}")),
                         IconName::ArrowRight,
-                        format!("Copy to {right_name}"),
+                        tip,
                     )
                     .text_color(p.fg_secondary)
                     .on_click(move |_, _, cx| {
@@ -4763,11 +5099,16 @@ impl EnvyApp {
                 );
             }
             if can_copy_left {
+                let tip = if row.right_disabled {
+                    format!("Copy to {left_name} (off)")
+                } else {
+                    format!("Copy to {left_name}")
+                };
                 gutter = gutter.child(
                     row_icon_button(
                         SharedString::from(format!("diff-to-left-{index}")),
                         IconName::ArrowLeft,
-                        format!("Copy to {left_name}"),
+                        tip,
                     )
                     .text_color(p.fg_secondary)
                     .on_click(move |_, _, cx| {
@@ -4778,16 +5119,26 @@ impl EnvyApp {
                 );
             }
 
-            let right_col = div()
+            let mut right_col = h_flex()
                 .flex_1()
                 .min_w(px(0.))
                 .pl(px(8.))
-                .font_family(mono.clone())
-                .text_size(px(13.))
-                .line_height(px(18.))
-                .truncate()
-                .text_color(right_color)
-                .child(right_text);
+                .gap(px(6.))
+                .items_center();
+            if row.right_disabled {
+                right_col = right_col.child(off_badge(p));
+            }
+            right_col = right_col.child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .font_family(mono.clone())
+                    .text_size(px(13.))
+                    .line_height(px(18.))
+                    .truncate()
+                    .text_color(right_color)
+                    .child(right_text),
+            );
 
             line = line
                 .child(key_col)
@@ -4823,6 +5174,7 @@ impl EnvyApp {
             Overlay::AddFolder => self.folder_panel(p, cx),
             Overlay::Paste(plan) => self.paste_panel(plan, p, mono, cx),
             Overlay::Shortcuts => self.shortcuts_panel(p, mono, cx),
+            Overlay::Unreadable => self.unreadable_panel(p, mono, cx),
             Overlay::None => div(),
         };
         div()
@@ -5213,16 +5565,16 @@ impl EnvyApp {
             cx.notify();
             return;
         };
-        let pairs: Vec<(String, String)> = report
+        let entries: Vec<(String, String, bool)> = report
             .rows
             .into_iter()
             .filter_map(|row| {
-                let (kind, value) = match from {
-                    DiffSide::Left => (diff::DiffKind::OnlyLeft, row.left),
-                    DiffSide::Right => (diff::DiffKind::OnlyRight, row.right),
+                let (kind, value, disabled) = match from {
+                    DiffSide::Left => (diff::DiffKind::OnlyLeft, row.left, row.left_disabled),
+                    DiffSide::Right => (diff::DiffKind::OnlyRight, row.right, row.right_disabled),
                 };
                 if row.kind == kind {
-                    Some((row.key, value.unwrap_or_default()))
+                    Some((row.key, value.unwrap_or_default(), disabled))
                 } else {
                     None
                 }
@@ -5232,7 +5584,7 @@ impl EnvyApp {
             DiffSide::Left => DiffSide::Right,
             DiffSide::Right => DiffSide::Left,
         };
-        self.put_pairs(to, pairs, cx);
+        self.put_entries(to, entries, cx);
     }
 
     fn copy_diff_row(&mut self, index: usize, from: DiffSide, cx: &mut Context<Self>) {
@@ -5244,9 +5596,9 @@ impl EnvyApp {
         else {
             return;
         };
-        let value = match from {
-            DiffSide::Left => row.left,
-            DiffSide::Right => row.right,
+        let (value, disabled) = match from {
+            DiffSide::Left => (row.left, row.left_disabled),
+            DiffSide::Right => (row.right, row.right_disabled),
         };
         let Some(value) = value else {
             self.status = "That side has no value for this key.".into();
@@ -5257,16 +5609,21 @@ impl EnvyApp {
             DiffSide::Left => DiffSide::Right,
             DiffSide::Right => DiffSide::Left,
         };
-        self.put_pairs(to, vec![(row.key, value)], cx);
+        self.put_entries(to, vec![(row.key, value, disabled)], cx);
     }
 
-    fn put_pairs(&mut self, side: DiffSide, pairs: Vec<(String, String)>, cx: &mut Context<Self>) {
-        if pairs.is_empty() {
+    fn put_entries(
+        &mut self,
+        side: DiffSide,
+        entries: Vec<(String, String, bool)>,
+        cx: &mut Context<Self>,
+    ) {
+        if entries.is_empty() {
             self.status = "Nothing to copy.".into();
             cx.notify();
             return;
         }
-        let count = pairs.len();
+        let count = entries.len();
         let Some(path) = self.side_path(side) else {
             return;
         };
@@ -5275,7 +5632,7 @@ impl EnvyApp {
             let Some(open) = self.open.as_mut() else {
                 return;
             };
-            open.mutate(|document| write_pairs(document, &pairs));
+            open.mutate(|document| write_entries(document, &entries));
             let cloned = self
                 .open
                 .as_ref()
@@ -5297,7 +5654,7 @@ impl EnvyApp {
                 cx.notify();
                 return;
             };
-            write_pairs(doc, &pairs);
+            write_entries(doc, &entries);
             let text = doc.serialize();
             let name = path
                 .file_name()
@@ -5318,6 +5675,125 @@ impl EnvyApp {
             text,
         });
         self.pump_io(cx);
+    }
+
+    fn unreadable_panel(
+        &self,
+        p: Palette,
+        mono: SharedString,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        let entity = cx.entity();
+        let close_entity = entity.clone();
+        let lines: Vec<UnreadableLine> = self
+            .open
+            .as_ref()
+            .map(|open| open.document.unreadable_lines())
+            .unwrap_or_default();
+
+        let mut list = v_flex()
+            .id("unreadable-list")
+            .rounded(px(6.))
+            .border_1()
+            .border_color(p.border_hairline)
+            .bg(p.bg_chrome)
+            .max_h(px(260.))
+            .overflow_y_scroll();
+
+        if lines.is_empty() {
+            list = list.child(
+                div()
+                    .p(px(12.))
+                    .text_size(px(12.5))
+                    .line_height(px(17.))
+                    .text_color(p.fg_tertiary)
+                    .child("All lines in this file are readable."),
+            );
+        } else {
+            for (ix, item) in lines.iter().enumerate() {
+                let mut row = h_flex()
+                    .id(SharedString::from(format!(
+                        "unreadable-line-{}",
+                        item.line_number
+                    )))
+                    .min_h(px(28.))
+                    .px(px(10.))
+                    .py(px(5.))
+                    .gap(px(12.))
+                    .items_center()
+                    .tooltip(hover_tip(item.text.clone()));
+                if ix > 0 {
+                    row = row.border_t_1().border_color(p.border_hairline);
+                }
+                row = row
+                    .child(
+                        div()
+                            .w(px(36.))
+                            .flex_shrink_0()
+                            .text_right()
+                            .font_family(mono.clone())
+                            .text_size(px(11.5))
+                            .line_height(px(16.))
+                            .text_color(p.fg_tertiary)
+                            .child(item.line_number.to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .font_family(mono.clone())
+                            .text_size(px(12.))
+                            .line_height(px(16.))
+                            .text_color(p.fg_primary)
+                            .truncate()
+                            .child(item.text.clone()),
+                    );
+                list = list.child(row);
+            }
+        }
+
+        v_flex()
+            .w(px(540.))
+            .bg(p.bg_surface)
+            .border_1()
+            .border_color(p.border_control)
+            .rounded(px(10.))
+            .shadow_lg()
+            .overflow_hidden()
+            .child(overlay_header("Lines Envy can't read", p, entity))
+            .child(
+                v_flex()
+                    .p(px(16.))
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .line_height(px(17.))
+                            .text_color(p.fg_secondary)
+                            .child("These lines are left untouched when you save."),
+                    )
+                    .child(list),
+            )
+            .child(
+                h_flex()
+                    .px(px(16.))
+                    .py(px(10.))
+                    .bg(p.bg_chrome)
+                    .border_t_1()
+                    .border_color(p.border_hairline)
+                    .items_center()
+                    .justify_between()
+                    .child(footer_hint("Esc", "Close", p, mono))
+                    .child(
+                        Button::new("unreadable-close")
+                            .ghost()
+                            .small()
+                            .label("Close")
+                            .on_click(move |_, window, cx| {
+                                close_entity.update(cx, |this, cx| this.close_overlay(window, cx));
+                            }),
+                    ),
+            )
     }
 
     fn shortcuts_panel(
@@ -5402,6 +5878,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("c", "Copy the value"),
     ("Space", "Show the value"),
     ("a", "Show every value"),
+    ("Ctrl+/", "Turn key on or off"),
     ("n", "New key"),
     ("Ctrl+S", "Save"),
     ("Ctrl+Z", "Undo"),
@@ -5667,6 +6144,22 @@ fn side_badge(tag: &'static str, p: Palette) -> gpui_kit::Div {
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(p.accent)
         .child(tag)
+}
+
+fn off_badge(p: Palette) -> gpui_kit::Div {
+    div()
+        .px(px(5.))
+        .py(px(1.))
+        .flex_shrink_0()
+        .rounded(px(4.))
+        .bg(p.bg_kbd)
+        .border_1()
+        .border_color(p.border_hairline)
+        .text_size(px(10.))
+        .line_height(px(12.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(p.fg_tertiary)
+        .child("off")
 }
 
 fn neutral_summary_chip(

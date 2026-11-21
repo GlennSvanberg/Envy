@@ -187,6 +187,7 @@ mod tests {
                 path: PathBuf::from("/work/billing/.env.local"),
                 name: ".env.local".into(),
                 keys: vec!["DATABASE_URL".into(), "STRIPE_KEY".into()],
+                active_keys: vec!["DATABASE_URL".into(), "STRIPE_KEY".into()],
                 prod: false,
                 missing_vs_example: true,
             }],
