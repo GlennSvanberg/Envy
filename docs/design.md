@@ -178,7 +178,7 @@ Two font families only:
     - `Eye` / `EyeOff` — Show/Hide all values (`A`), selected tint when active (disabled in plain text view)
     - `FileCode` / `List` — Switch between Table and Plain text view (`Ctrl+E`), selected tint when in plain text view, preference remembered in config
     - `Columns2` — Compare two files (`D`), selected tint when active, disabled when `< 2` files
-    - `FilePlus` — New `.env.local` from `.env.example` (`Ctrl+Shift+N`), disabled when no example exists
+    - `FilePlus` — New file from `.env.example` (`Ctrl+Shift+N`). The inline name starts as `.env`, or the next free name, and can be changed before Enter. Disabled when no example exists.
   - *Utility group:*
     - `Keyboard` — Keyboard shortcuts (`?`)
     - `Settings` — Settings (`Ctrl+,`)
@@ -201,7 +201,7 @@ Two font families only:
   - **Actions column (`w(64 px)`, `flex_shrink_0`, `justify_end`, `gap(4 px)`):** `Copy` (`Copy`) and `Reveal/Hide` (`Eye` / `EyeOff`) `24 × 24 px` icon buttons. Visible when the row is selected (focused) or hovered.
   - **Tail action:** A quiet `+ Add key` ghost row (`32 px`, `fg.tertiary`) sits below the last key so the table finishes cleanly above open canvas space.
   - **Inline editing (`Value`, `Rename`, `New`) & key-name autocomplete:** Renders inside the key column, the flexible value column, and the `64 px` actions column with a monospace `Input` and no outer double-border. Once at least 1 character is typed into a new or renamed key name, a quiet compact list (max 5 keys, matching the key input width, no source badges or footer bar, lightly emphasizing the matched text) appears directly below ranked internally by sibling env files missing from this file, other discovered projects, then common env key names. Navigable with `↑`/`↓`/`Tab`/`Enter`/`Esc` or mouse click; picking a key never prefills or hints values.
-  - **File name:** `+` in the toolbar asks for a new env file name in the tab bar. The field starts as `.env`, or the next free name (`.env.local`, `.env.development`, `.env.dev`, then `.env.2`, `.env.3`, …) when that name exists. The name is selected so it can be changed before Enter. Double-clicking a tab renames that file in place. Enter confirms, Esc cancels, and a name that is taken or not an env file is explained on the line under the field.
+  - **File name:** `+` in the toolbar asks for a new env file name in the tab bar. The field starts as `.env`, or the next free name (`.env.local`, `.env.development`, `.env.dev`, then `.env.2`, `.env.3`, …) when that name exists. The name is selected so it can be changed before Enter. `Ctrl+Shift+N` uses that same field and fills the file from `.env.example`. Double-clicking a tab renames that file in place. Enter confirms, Esc cancels, and a name that is taken or not an env file is explained on the line under the field.
 
 ### 5.4b Plain Text Editor View
 - Toggled via the toolbar `FileCode` / `List` icon button or `Ctrl+E`. Choice is persisted in config (`editor_view = "table" | "text"`).

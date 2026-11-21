@@ -21,7 +21,7 @@ The window is [GPUI](https://github.com/zed-industries/zed) through [gpui-kit](h
 - Values are masked. Reveal one key, or all of them. Copy clears the clipboard after 30 seconds unless you turn that off.
 - Ctrl+click or Shift+click two file tabs to compare them. Keys line up in two columns. Each row can copy a value either way, and each side can copy every missing key. A plain click returns to the file.
 - Paste a block of `KEY=value` lines. Envy shows a preview; Enter applies it.
-- New `.env.local` from `.env.example`. Comments and safe defaults stay. Secret values are cleared.
+- New file from `.env.example` (`Ctrl+Shift+N`). The name starts as `.env`, or the next free name, and you can change it before Enter. Comments and safe defaults stay. Secret values are cleared.
 - Find a project from the sidebar field, and a key from the field above the list. `/` or `Ctrl+F` focuses the field for the area you are in. Values are not searchable and are not stored.
 - Light and dark, following the system, with an override. The accent is the logo green. A production file name gets a red dot.
 - One window. `envy://` links and a second launch go to the window that is already open. `Ctrl+Alt+E` raises it. Closing the window quits.
@@ -52,7 +52,7 @@ Press `?` for the same list inside the window.
 | `Ctrl+Y` or `Ctrl+Shift+Z` | Redo |
 | `Tab` / `Shift+Tab` | Next or previous value, while a value is open |
 | `Ctrl+V` | Paste `KEY=value` lines |
-| `Ctrl+Shift+N` | New `.env.local` from the example |
+| `Ctrl+Shift+N` | New file from the example |
 | `Ctrl+O` | Add a folder |
 | `Ctrl+,` | Settings |
 | `Ctrl+R` | Rescan folders |

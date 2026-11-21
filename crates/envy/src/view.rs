@@ -98,6 +98,8 @@ enum FilePrompt {
     Create {
         input: Entity<InputState>,
         error: Option<String>,
+        /// Fill the new file from `.env.example` instead of leaving it empty.
+        from_example: bool,
     },
     Rename {
         file_ix: usize,
@@ -3072,57 +3074,34 @@ impl EnvyApp {
         cx.notify();
     }
 
-    fn new_from_example(&mut self, cx: &mut Context<Self>) {
-        let Some(project) = self.project_ix.and_then(|ix| self.projects.get(ix)) else {
+    fn new_from_example(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .project_ix
+            .and_then(|ix| self.projects.get(ix))
+            .is_none()
+        {
             self.status = "Open a project first.".into();
             cx.notify();
             return;
-        };
-        let Some(example) = project
-            .files
-            .iter()
-            .find(|file| is_example_filename(&file.name))
-        else {
+        }
+        if self.example_path().is_none() {
             self.status = "This project has no .env.example.".into();
             cx.notify();
             return;
-        };
-        let example_path = example.path.clone();
-        let dest = example
-            .path
-            .parent()
-            .unwrap_or(project.root.as_path())
-            .join(".env.local");
-        self.status = "Creating .env.local…".into();
-        cx.notify();
-        cx.spawn(async move |this, async_cx| {
-            let created = async_cx
-                .background_executor()
-                .spawn(async move {
-                    if dest.exists() {
-                        return Err(".env.local already exists.".to_string());
-                    }
-                    let loaded = OpenFile::load(&example_path)
-                        .map_err(|err| format!("Could not read example: {err}"))?;
-                    let document = from_example(&loaded.document);
-                    OpenFile::create(&dest, document)
-                        .map_err(|err| format!("Could not create file: {err}"))?;
-                    Ok(dest)
-                })
-                .await;
-            let _ = this.update(async_cx, |view, cx| {
-                match created {
-                    Ok(dest) => {
-                        view.pending_file = Some(dest);
-                        view.status = "Created .env.local from the example.".into();
-                        view.begin_scan(false, cx);
-                    }
-                    Err(err) => view.status = err,
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+        }
+        self.open_new_file_prompt(true, window, cx);
+    }
+
+    fn example_path(&self) -> Option<PathBuf> {
+        self.project_ix
+            .and_then(|ix| self.projects.get(ix))
+            .and_then(|project| {
+                project
+                    .files
+                    .iter()
+                    .find(|file| is_example_filename(&file.name))
+                    .map(|file| file.path.clone())
+            })
     }
 
     fn file_prompt_input(&self) -> Option<&Entity<InputState>> {
@@ -3211,27 +3190,33 @@ impl EnvyApp {
             cx.notify();
             return;
         }
+        self.open_new_file_prompt(false, window, cx);
+    }
+
+    fn open_new_file_prompt(
+        &mut self,
+        from_example: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.editor.is_some() {
             self.commit_editor(None, false, window, cx);
         }
-        let names = self
-            .project_ix
-            .and_then(|ix| self.projects.get(ix))
-            .map(|project| {
-                project
-                    .files
-                    .iter()
-                    .map(|file| file.name.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let name = next_env_filename(&names);
+        let name = next_env_filename(&self.current_file_names());
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(name)
                 .placeholder("File name")
         });
-        self.open_file_prompt(FilePrompt::Create { input, error: None }, window, cx);
+        self.open_file_prompt(
+            FilePrompt::Create {
+                input,
+                error: None,
+                from_example,
+            },
+            window,
+            cx,
+        );
     }
 
     fn begin_rename_file(&mut self, file_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -3271,11 +3256,23 @@ impl EnvyApp {
 
     fn commit_file_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let names = self.current_file_names();
-        let (creating, file_ix, text) = match &self.file_prompt {
-            FilePrompt::Create { input, .. } => (true, None, input.read(cx).value().to_string()),
-            FilePrompt::Rename { file_ix, input, .. } => {
-                (false, Some(*file_ix), input.read(cx).value().to_string())
-            }
+        let (creating, from_example, file_ix, text) = match &self.file_prompt {
+            FilePrompt::Create {
+                input,
+                from_example,
+                ..
+            } => (
+                true,
+                *from_example,
+                None,
+                input.read(cx).value().to_string(),
+            ),
+            FilePrompt::Rename { file_ix, input, .. } => (
+                false,
+                false,
+                Some(*file_ix),
+                input.read(cx).value().to_string(),
+            ),
             FilePrompt::None => return,
         };
         let ignoring = file_ix.and_then(|index| names.get(index)).cloned();
@@ -3303,15 +3300,45 @@ impl EnvyApp {
         let Some(project_ix) = self.project_ix else {
             return;
         };
-        let Some(project) = self.projects.get(project_ix) else {
+        let Some(root) = self
+            .projects
+            .get(project_ix)
+            .map(|project| project.root.clone())
+        else {
             return;
         };
         if creating {
-            let dest = project.root.join(&name);
+            let example = self.example_path();
+            let dest_dir = if from_example {
+                let Some(example) = example.as_ref() else {
+                    self.status = "This project has no .env.example.".into();
+                    cx.notify();
+                    return;
+                };
+                example
+                    .parent()
+                    .map(|parent| parent.to_path_buf())
+                    .unwrap_or(root)
+            } else {
+                root
+            };
+            let dest = dest_dir.join(&name);
             self.close_file_prompt();
             self.focus_self(window, cx);
-            self.spawn_create_file(dest, name, cx);
+            if from_example {
+                let Some(example) = example else {
+                    self.status = "This project has no .env.example.".into();
+                    cx.notify();
+                    return;
+                };
+                self.spawn_create_from_example(example, dest, name, cx);
+            } else {
+                self.spawn_create_file(dest, name, cx);
+            }
         } else {
+            let Some(project) = self.projects.get(project_ix) else {
+                return;
+            };
             let Some(file_ix) = file_ix else {
                 return;
             };
@@ -3339,6 +3366,37 @@ impl EnvyApp {
                     Ok(path) => {
                         view.pending_file = Some(path);
                         view.status = format!("Created {name}.");
+                        view.begin_scan(true, cx);
+                    }
+                    Err(_) => view.status = "Couldn't create that file.".into(),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn spawn_create_from_example(
+        &mut self,
+        example: PathBuf,
+        dest: PathBuf,
+        name: String,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, async_cx| {
+            let created = async_cx
+                .background_executor()
+                .spawn(async move {
+                    let loaded = OpenFile::load(&example)?;
+                    let document = from_example(&loaded.document);
+                    OpenFile::create(&dest, document).map(|_| dest)
+                })
+                .await;
+            let _ = this.update(async_cx, |view, cx| {
+                match created {
+                    Ok(path) => {
+                        view.pending_file = Some(path);
+                        view.status = format!("Created {name} from the example.");
                         view.begin_scan(true, cx);
                     }
                     Err(_) => view.status = "Couldn't create that file.".into(),
@@ -3890,7 +3948,9 @@ impl Render for EnvyApp {
             .on_action(cx.listener(|this, _: &ToggleEditorView, window, cx| {
                 this.toggle_editor_view(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &NewFromExample, _, cx| this.new_from_example(cx)))
+            .on_action(cx.listener(|this, _: &NewFromExample, window, cx| {
+                this.new_from_example(window, cx);
+            }))
             .on_action(
                 cx.listener(|this, _: &AddFolder, window, cx| this.open_add_folder(window, cx)),
             )
@@ -4938,16 +4998,16 @@ impl EnvyApp {
                 toolbar_icon_button(
                     "tb-example",
                     IconName::FilePlus,
-                    "New .env.local from example",
+                    "New file from example",
                     false,
                     !has_example,
                     p,
                 )
-                .tooltip_with_action("New .env.local from example", &NewFromExample, Some("Envy"))
+                .tooltip_with_action("New file from example", &NewFromExample, Some("Envy"))
                 .on_click({
                     let entity = entity.clone();
-                    move |_, _, cx| {
-                        entity.update(cx, |this, cx| this.new_from_example(cx));
+                    move |_, window, cx| {
+                        entity.update(cx, |this, cx| this.new_from_example(window, cx));
                     }
                 }),
             )
