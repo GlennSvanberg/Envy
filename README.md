@@ -64,9 +64,9 @@ Files, dark. The selected row has copy and reveal icons.
 
 ![Files, dark](docs/screenshots/files-dark.png)
 
-The same file in light, with a comparison open. Green is equal, amber differs, red is only on the right.
+The same file in light, and a two-column comparison in dark. Equal rows stay clear, amber differs, green is left only, red is right only.
 
-![Files and diff, light](docs/screenshots/files-light.png)
+![Files, light](docs/screenshots/files-light.png)
 
 ![Diff, dark](docs/screenshots/diff.png)
 

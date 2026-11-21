@@ -50,6 +50,8 @@ pub fn bind(cx: &mut gpui_kit::App) {
         KeyBinding::new("l", MoveRight, list),
         KeyBinding::new("left", FocusSidebar, list),
         KeyBinding::new("right", FocusKeys, list),
+        KeyBinding::new("tab", SwitchZone, Some("Envy")),
+        KeyBinding::new("shift-tab", SwitchZoneBack, Some("Envy")),
         KeyBinding::new("f", ToggleFavorite, list),
         KeyBinding::new("/", FocusSearch, list),
         KeyBinding::new("ctrl-f", FocusSearch, Some("Envy")),

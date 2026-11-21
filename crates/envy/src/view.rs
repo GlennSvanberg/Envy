@@ -25,18 +25,23 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
-    h_flex, v_flex, ActiveTheme, Selectable, Sizable, Theme, ThemeMode, TitleBar,
+    h_flex, v_flex, ActiveTheme, Disableable, Icon, Selectable, Sizable, Theme, ThemeMode, TitleBar,
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, rgb, size, AnyView, AnyWindowHandle, App, Bounds, ClipboardItem, Context, Entity,
-    FocusHandle, Focusable, KeyDownEvent, MouseButton, PathPromptOptions, ScrollHandle,
+    div, px, size, AnyView, AnyWindowHandle, App, Bounds, ClipboardItem, Context, Entity,
+    FocusHandle, Focusable, FontWeight, KeyDownEvent, MouseButton, PathPromptOptions, ScrollHandle,
     SharedString, Subscription, Task, Window, WindowBounds, WindowOptions,
 };
 
 use crate::actions::*;
 use crate::hotkey_os;
 use crate::instance::Instance;
+use crate::theme::{
+    self, Palette, COL_HEADER_H, DIFF_GUTTER_W, DIFF_HEADER_H, DIFF_KEY_COL_W, DIFF_ROW_H,
+    FOOTER_H, KEY_ACTIONS_W, KEY_COL_W, KEY_ROW_H, MASK_MAX_DOTS, SIDEBAR_HEADER_H, SIDEBAR_ROW_H,
+    SIDEBAR_W, TAB_BAR_H, TOOLBAR_H,
+};
 
 const CLEAR_AFTER: Duration = Duration::from_secs(30);
 
@@ -99,15 +104,19 @@ pub struct EnvyApp {
     hotkey_input: Entity<InputState>,
     input_subs: Vec<Subscription>,
     project_scroll: ScrollHandle,
+    key_scroll: ScrollHandle,
+    diff_scroll: ScrollHandle,
     project_filter: Entity<InputState>,
     filter_query: String,
     key_filter: Entity<InputState>,
     key_query: String,
     diff_open: bool,
+    diff_cursor: usize,
     diff_left: Option<usize>,
     diff_right: Option<usize>,
     diff_left_doc: Option<EnvDocument>,
     diff_right_doc: Option<EnvDocument>,
+    last_dark: Option<bool>,
     status: String,
     clear_token: u64,
     clear_task: Option<Task<()>>,
@@ -197,15 +206,19 @@ impl EnvyApp {
             hotkey_input,
             input_subs: Vec::new(),
             project_scroll: ScrollHandle::new(),
+            key_scroll: ScrollHandle::new(),
+            diff_scroll: ScrollHandle::new(),
             project_filter,
             filter_query: String::new(),
             key_filter,
             key_query: String::new(),
             diff_open: false,
+            diff_cursor: 0,
             diff_left: None,
             diff_right: None,
             diff_left_doc: None,
             diff_right_doc: None,
+            last_dark: None,
             status: "Starting".into(),
             clear_token: 0,
             clear_task: None,
@@ -284,15 +297,19 @@ impl EnvyApp {
         self.sort_recent = self.config.recent_projects.clone();
         self.booting = false;
         let hotkey = self.config.settings.global_hotkey.clone();
-        self.window
+        let window_handle = self.window;
+        let hotkey_input = self.hotkey_input.clone();
+        let theme_setting = self.config.settings.theme;
+        window_handle
             .update(cx, |_, window, cx| {
                 let hotkey = hotkey.clone();
-                self.hotkey_input.update(cx, |input, cx| {
+                hotkey_input.update(cx, |input, cx| {
                     input.set_value(hotkey, window, cx);
                 });
-                self.apply_theme(window, cx);
+                apply_theme_setting(theme_setting, window, cx);
             })
             .ok();
+        self.last_dark = Some(cx.theme().mode.is_dark());
         self.install_hotkey(hotkey, false, cx);
         self.config_load = config_load;
         let _ = ui_ready;
@@ -312,13 +329,13 @@ impl EnvyApp {
     }
 
     pub fn window_options(bounds_cx: &mut App) -> WindowOptions {
-        let bounds = Bounds::centered(None, size(px(1100.), px(720.)), bounds_cx);
+        let bounds = Bounds::centered(None, size(px(1120.), px(720.)), bounds_cx);
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitleBar::title_bar_options()),
             app_owns_titlebar_drag: true,
             app_id: Some("envy".into()),
-            window_min_size: Some(size(px(760.), px(480.))),
+            window_min_size: Some(size(px(780.), px(500.))),
             focus: true,
             show: true,
             icon: crate::window_icon(),
@@ -421,7 +438,11 @@ impl EnvyApp {
         if self.config.settings.theme == ThemeSetting::System {
             Theme::sync_system_appearance(None, cx);
         }
-        self.paint_accent(cx);
+        let dark = cx.theme().mode.is_dark();
+        if self.last_dark != Some(dark) {
+            self.last_dark = Some(dark);
+            theme::apply_palette(cx);
+        }
     }
 
     fn on_second_launch(&mut self, message: String, cx: &mut Context<Self>) {
@@ -447,36 +468,9 @@ impl EnvyApp {
             .ok();
     }
 
-    fn apply_theme(&self, window: &mut Window, cx: &mut App) {
-        match self.config.settings.theme {
-            ThemeSetting::System => Theme::sync_system_appearance(Some(window), cx),
-            ThemeSetting::Light => Theme::change(ThemeMode::Light, Some(window), cx),
-            ThemeSetting::Dark => Theme::change(ThemeMode::Dark, Some(window), cx),
-        }
-        self.paint_accent(cx);
-    }
-
-    /// Logo green (`#34D399` on dark, `#047857` on light). One accent for the window.
-    fn paint_accent(&self, cx: &mut App) {
-        Theme::update(cx, |theme| {
-            let mark: gpui_kit::Hsla = if theme.mode.is_dark() {
-                rgb(0x34D399).into()
-            } else {
-                rgb(0x047857).into()
-            };
-            theme.primary = mark;
-            theme.ring = mark;
-            theme.caret = mark;
-            theme.link = mark;
-            theme.list_highlight_foreground = mark;
-            theme.sidebar_accent = mark.opacity(0.18);
-            theme.sidebar_accent_foreground = mark;
-            theme.accent = if theme.mode.is_dark() {
-                mark
-            } else {
-                rgb(0xD1FAE5).into()
-            };
-        });
+    fn apply_theme(&mut self, window: &mut Window, cx: &mut App) {
+        apply_theme_setting(self.config.settings.theme, window, cx);
+        self.last_dark = Some(cx.theme().mode.is_dark());
     }
 
     fn begin_scan(&mut self, quiet: bool, cx: &mut Context<Self>) {
@@ -617,7 +611,7 @@ impl EnvyApp {
             self.scan_found = self.scan_found.saturating_add(1);
         }
         if self.project_ix.is_none() && !self.projects.is_empty() {
-            self.project_ix = Some(0);
+            self.project_ix = self.visible_project_indexes().first().copied();
             self.file_ix = self
                 .project_ix
                 .and_then(|index| self.projects.get(index))
@@ -824,6 +818,18 @@ impl EnvyApp {
     }
 
     fn switch_zone(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.overlay, Overlay::None) {
+            if forward {
+                window.focus_next(cx);
+            } else {
+                window.focus_prev(cx);
+            }
+            return;
+        }
+        if self.editor.is_some() {
+            self.commit_focused_field(window, cx);
+            return;
+        }
         let has_tabs = self.file_count() > 0;
         self.zone = match (self.zone, forward, has_tabs) {
             (Zone::Projects, true, true) => Zone::Tabs,
@@ -922,11 +928,40 @@ impl EnvyApp {
 
     fn clear_compare(&mut self) {
         self.diff_open = false;
+        self.diff_cursor = 0;
         self.diff_left = None;
         self.diff_right = None;
         self.diff_left_doc = None;
         self.diff_right_doc = None;
         self.diff_report = None;
+    }
+
+    fn compare_with_example(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.project_ix.and_then(|ix| self.projects.get(ix)) else {
+            return;
+        };
+        let Some(example_ix) = project
+            .files
+            .iter()
+            .position(|file| is_example_filename(&file.name))
+        else {
+            self.toggle_diff(cx);
+            return;
+        };
+        let Some(current) = self.file_ix else {
+            return;
+        };
+        if example_ix == current {
+            self.toggle_diff(cx);
+            return;
+        }
+        self.diff_left = Some(example_ix);
+        self.diff_right = Some(current);
+        self.diff_cursor = 0;
+        self.diff_open = true;
+        self.zone = Zone::Keys;
+        self.load_diff(cx);
+        cx.notify();
     }
 
     fn filter_focused(&self, which: Zone, window: &Window, cx: &App) -> bool {
@@ -1527,6 +1562,7 @@ impl EnvyApp {
             })
         {
             self.cursor = position;
+            self.key_scroll.scroll_to_item(position);
             self.zone = Zone::Keys;
         }
     }
@@ -1553,7 +1589,27 @@ impl EnvyApp {
                 let next_pos = (current + delta).clamp(0, visible.len() as isize - 1) as usize;
                 self.select_project(visible[next_pos], false, window, cx);
             }
-            Zone::Tabs => self.move_tab(delta, cx),
+            Zone::Tabs => {
+                if delta > 0 {
+                    self.focus_keys_zone(window, cx);
+                } else {
+                    self.move_tab(-1, cx);
+                }
+            }
+            Zone::Keys if self.diff_open => {
+                let len = self
+                    .diff_report
+                    .as_ref()
+                    .map(|report| report.rows.len() as isize)
+                    .unwrap_or(0);
+                if len == 0 {
+                    return;
+                }
+                let next = (self.diff_cursor as isize + delta).clamp(0, len - 1) as usize;
+                self.diff_cursor = next;
+                self.diff_scroll.scroll_to_item(next);
+                cx.notify();
+            }
             Zone::Keys => {
                 let len = self.visible_entry_nodes().len() as isize;
                 if len == 0 {
@@ -1568,6 +1624,7 @@ impl EnvyApp {
                 }
                 let next = (self.cursor as isize + delta).clamp(0, len - 1) as usize;
                 self.cursor = next;
+                self.key_scroll.scroll_to_item(next);
                 cx.notify();
             }
         }
@@ -1999,7 +2056,15 @@ impl EnvyApp {
     }
 
     fn toggle_reveal(&mut self, cx: &mut Context<Self>) {
-        let Some(key) = self.selected_key() else {
+        let key = if self.diff_open {
+            self.diff_report
+                .as_ref()
+                .and_then(|report| report.rows.get(self.diff_cursor))
+                .map(|row| row.key.clone())
+        } else {
+            self.selected_key()
+        };
+        let Some(key) = key else {
             return;
         };
         if !self.revealed.remove(&key) {
@@ -2373,6 +2438,7 @@ impl EnvyApp {
         if mods.control && !mods.alt && !mods.platform && matches!(self.overlay, Overlay::None) {
             if key == "tab" {
                 self.move_file(if mods.shift { -1 } else { 1 }, window, cx);
+                window.prevent_default();
                 cx.stop_propagation();
                 return;
             }
@@ -2380,6 +2446,7 @@ impl EnvyApp {
                 if let Ok(n) = key.parse::<usize>() {
                     if (1..=9).contains(&n) {
                         self.activate_tab(n - 1, true, window, cx);
+                        window.prevent_default();
                         cx.stop_propagation();
                         return;
                     }
@@ -2392,10 +2459,16 @@ impl EnvyApp {
         match key {
             "tab" if self.editor.is_some() => {
                 self.commit_focused_field(window, cx);
+                window.prevent_default();
                 cx.stop_propagation();
             }
-            "tab" if matches!(self.overlay, Overlay::None) => {
+            "tab"
+                if matches!(self.overlay, Overlay::None)
+                    && (self.filter_focused(Zone::Projects, window, cx)
+                        || self.filter_focused(Zone::Keys, window, cx)) =>
+            {
                 self.switch_zone(!mods.shift, window, cx);
+                window.prevent_default();
                 cx.stop_propagation();
             }
             "down"
@@ -2405,18 +2478,22 @@ impl EnvyApp {
                         || self.filter_focused(Zone::Keys, window, cx)) =>
             {
                 self.step_out_of_search(window, cx);
+                window.prevent_default();
                 cx.stop_propagation();
             }
             "escape" => {
                 self.cancel(window, cx);
+                window.prevent_default();
                 cx.stop_propagation();
             }
             "enter" if mods.shift && self.editor.is_none() && self.zone == Zone::Tabs => {
                 self.toggle_compare_tab(self.tab_cursor, cx);
+                window.prevent_default();
                 cx.stop_propagation();
             }
             "enter" if self.capture_enter() => {
                 self.confirm(window, cx);
+                window.prevent_default();
                 cx.stop_propagation();
             }
             _ => {}
@@ -2501,12 +2578,19 @@ fn masked(value: &str) -> String {
     if count == 0 {
         return String::new();
     }
-    let shown = count.min(64);
-    let mut text = "•".repeat(shown);
-    if count > shown {
-        text.push_str(&format!(" +{}", count - shown));
+    "•".repeat(count.min(MASK_MAX_DOTS))
+}
+
+fn display_branch(branch: &str) -> Option<&str> {
+    let trimmed = branch.trim();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("unknown")
+        || matches!(trimmed, "—" | "-" | "…")
+    {
+        None
+    } else {
+        Some(trimmed)
     }
-    text
 }
 
 fn block_paste(
@@ -2568,671 +2652,79 @@ impl Focusable for EnvyApp {
 
 impl Render for EnvyApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme_bg = cx.theme().background;
-        let theme_fg = cx.theme().foreground;
-        let theme_muted = cx.theme().muted_foreground;
-        let theme_border = cx.theme().border;
-        let theme_sidebar = cx.theme().sidebar;
-        let theme_sidebar_fg = cx.theme().sidebar_foreground;
-        let theme_accent = cx.theme().sidebar_accent;
-        let accent = cx.theme().primary;
-        let theme_danger = cx.theme().danger;
+        let p = Palette::for_mode(cx.theme().mode.is_dark());
         let mono = cx.theme().mono_font_family.clone();
         let ui_font = cx.theme().font_family.clone();
-        let prod = rgb(0xE5484D);
 
-        let project_rows = self.projects.clone();
-        let visible_projects = self.visible_project_indexes();
-        let project_ix = self.project_ix;
-        let zone = self.zone;
-        let entity = cx.entity();
-        let mut sidebar = v_flex()
-            .w(px(260.))
-            .h_full()
-            .bg(theme_sidebar)
-            .text_color(theme_sidebar_fg)
-            .border_r_1()
-            .border_color(theme_border)
-            .child(
-                h_flex()
-                    .px_2()
-                    .h(px(36.))
-                    .items_center()
-                    .justify_between()
-                    .child({
-                        let mut tools = h_flex().gap_2().items_center();
-                        if self.scanning {
-                            tools = tools
-                                .child(
-                                    gpui_kit::component::Icon::new(IconName::LoaderCircle).xsmall(),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme_muted)
-                                        .child(files_found_label(self.scan_found)),
-                                );
-                        }
-                        tools
-                    })
-                    .child(
-                        icon_button("add-folder", IconName::FolderPlus, "Add folder").on_click({
-                            let entity = entity.clone();
-                            move |_, window, cx| {
-                                entity.update(cx, |this, cx| this.open_add_folder(window, cx));
-                            }
-                        }),
-                    ),
-            )
-            .child(
-                div()
-                    .px_2()
-                    .pb_1()
-                    .child(Input::new(&self.project_filter).small()),
-            );
-        if self.booting && project_rows.is_empty() {
-            sidebar = sidebar.child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .text_sm()
-                    .text_color(theme_muted)
-                    .child("Starting"),
-            );
-        } else if project_rows.is_empty() && !self.scanning {
-            sidebar = sidebar.child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .text_sm()
-                    .text_color(theme_muted)
-                    .child("No folders yet."),
-            );
-        }
-        let mut project_list = v_flex()
-            .id("project-list")
-            .size_full()
-            .overflow_y_scroll()
-            .track_scroll(&self.project_scroll);
-        if !project_rows.is_empty() && visible_projects.is_empty() {
-            project_list = project_list.child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .text_sm()
-                    .text_color(theme_muted)
-                    .child("No matching projects."),
-            );
-        }
-        for (visible_ix, index) in visible_projects.iter().copied().enumerate() {
-            let project = &project_rows[index];
-            let selected = project_ix == Some(index);
-            let favorite = self.config.is_favorite(&project.root);
-            let entity = entity.clone();
-            let star_entity = entity.clone();
-            let group = SharedString::from(format!("project-row-{index}"));
-            let mut row = h_flex()
-                .id(SharedString::from(format!("project-{visible_ix}")))
-                .group(group.clone())
-                .mx_1()
-                .px_2()
-                .h(px(40.))
-                .gap_2()
-                .rounded(px(6.))
-                .items_center()
-                .overflow_hidden()
-                .cursor_pointer()
-                .tooltip(hover_tip(format!(
-                    "{} · {}",
-                    project.name,
-                    project.root.display()
-                )))
-                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                    entity.update(cx, |this, cx| {
-                        this.zone = Zone::Projects;
-                        this.remember_project(index, cx);
-                        this.select_project(index, false, window, cx);
-                    });
-                });
-            if selected {
-                row = row.bg(theme_accent);
-            }
-            row = row.child(
-                div()
-                    .size(px(6.))
-                    .rounded(px(99.))
-                    .flex_shrink_0()
-                    .when(project.missing_vs_example, |dot| dot.bg(theme_danger)),
-            );
-            row = row.child(
-                v_flex()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .justify_center()
-                    .child(
-                        div()
-                            .h(px(16.))
-                            .text_sm()
-                            .truncate()
-                            .text_color(if selected { accent } else { theme_sidebar_fg })
-                            .child(project.name.clone()),
-                    )
-                    .child(
-                        div()
-                            .h(px(14.))
-                            .text_xs()
-                            .text_color(theme_muted)
-                            .truncate()
-                            .child(if project.branch.is_empty() {
-                                " ".to_string()
-                            } else {
-                                project.branch.clone()
-                            }),
-                    ),
-            );
-            let mut star = div()
-                .w(px(22.))
-                .h(px(22.))
-                .flex_shrink_0()
-                .overflow_hidden();
-            if !favorite {
-                star = star.invisible().group_hover(group, |style| style.visible());
-            }
-            row = row.child(
-                star.child(
-                    icon_button(
-                        SharedString::from(format!("pin-{index}")),
-                        if favorite {
-                            IconName::Star
-                        } else {
-                            IconName::StarOff
-                        },
-                        if favorite { "Unpin" } else { "Pin" },
-                    )
-                    .text_color(if favorite { accent } else { theme_muted })
-                    .on_click(move |_, _, cx| {
-                        star_entity.update(cx, |this, cx| {
-                            this.project_ix = Some(index);
-                            this.toggle_favorite_selected(cx);
-                        });
-                    }),
-                ),
-            );
-            project_list = project_list.child(row);
-        }
-        sidebar = sidebar.child(
-            div()
-                .id("project-scroll-host")
-                .relative()
-                .flex_1()
-                .min_h(px(0.))
-                .w_full()
-                .border_2()
-                .border_color(if zone == Zone::Projects {
-                    accent
-                } else {
-                    accent.opacity(0.)
-                })
-                .child(project_list)
-                .child(Scrollbar::vertical(&self.project_scroll).mode(ScrollbarMode::Always)),
-        );
-
-        let file_tabs = self
-            .project_ix
-            .and_then(|ix| self.projects.get(ix))
-            .map(|project| project.files.clone())
-            .unwrap_or_default();
-        let file_ix = self.file_ix;
-        let mut tabs = h_flex()
-            .w_full()
-            .flex_shrink_0()
-            .id("file-tabs")
-            .overflow_x_scroll()
-            .border_2()
-            .border_color(if zone == Zone::Tabs {
-                accent
-            } else {
-                theme_border
-            });
-        for (index, file) in file_tabs.iter().enumerate() {
-            let marked = if self.diff_open {
-                self.diff_left == Some(index) || self.diff_right == Some(index)
-            } else {
-                file_ix == Some(index)
-            };
-            let cursor_tab = zone == Zone::Tabs && self.tab_cursor == index;
-            let entity = cx.entity();
-            let name = file.name.clone();
-            let mut label = h_flex()
-                .id(SharedString::from(format!("file-{index}")))
-                .px_3()
-                .h(px(32.))
-                .gap_1()
-                .items_center()
-                .text_sm()
-                .cursor_pointer()
-                .font_family(mono.clone())
-                .border_b_2()
-                .border_color(if marked { accent } else { accent.opacity(0.) })
-                .text_color(if marked || cursor_tab {
-                    accent
-                } else {
-                    theme_muted
-                })
-                .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-                    entity.update(cx, |this, cx| {
-                        this.zone = Zone::Tabs;
-                        this.tab_cursor = index;
-                        if event.modifiers.control || event.modifiers.shift {
-                            this.toggle_compare_tab(index, cx);
-                        } else {
-                            this.activate_tab(index, false, window, cx);
-                        }
-                    });
-                });
-            if cursor_tab {
-                label = label.bg(theme_accent);
-            }
-            if file.prod {
-                label = label.child(div().size(px(6.)).rounded(px(99.)).bg(prod).flex_shrink_0());
-            }
-            let shown = if file.missing_vs_example {
-                format!("{name} ·")
-            } else {
-                name.clone()
-            };
-            tabs = tabs.child(
-                label
-                    .child(div().truncate().child(shown))
-                    .tooltip(hover_tip(name)),
-            );
-        }
-
-        let missing = self.missing_names();
-        let nodes = self.visible_entry_nodes();
-        let cursor = self.cursor;
-        let show_all = self.show_all;
-        let revealed = self.revealed.clone();
-        let editing_node = self.editor.as_ref().and_then(|editor| editor.node);
-        let editing_new = self
-            .editor
-            .as_ref()
-            .is_some_and(|editor| matches!(editor.kind, EditKind::New));
-        let rows_src: Vec<(usize, String, String, bool)> = nodes
-            .iter()
-            .filter_map(|node| {
-                let open = self.open.as_ref()?;
-                match open.document.nodes.get(*node)? {
-                    Node::Entry(entry) => Some((
-                        *node,
-                        entry.key.clone(),
-                        entry.value.clone(),
-                        entry.exported,
-                    )),
-                    Node::Verbatim(_) => None,
-                }
-            })
-            .collect();
-
-        let mut table = v_flex().id("key-table").size_full().overflow_y_scroll();
-        if self.open.as_ref().is_some_and(|open| open.external_change) {
-            table = table.child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .bg(theme_danger)
-                    .text_color(cx.theme().danger_foreground)
-                    .text_sm()
-                    .child("This file changed on disk. R reloads it. Esc keeps what you have."),
-            );
-        }
-        if !missing.is_empty() {
-            table = table.child(
-                div()
-                    .px_3()
-                    .py_1()
-                    .text_xs()
-                    .text_color(theme_danger)
-                    .child(format!("{} missing vs .env.example", missing.len())),
-            );
-        }
-        if rows_src.is_empty() && self.open.is_some() {
-            let note = if self.key_query.trim().is_empty() {
-                "No keys. N adds one."
-            } else {
-                "No matching keys."
-            };
-            table = table.child(div().p_4().text_color(theme_muted).child(note));
-        }
-        for (row_ix, (node, key, value, exported)) in rows_src.iter().enumerate() {
-            let selected = cursor == row_ix && self.zone == Zone::Keys;
-            let visible = show_all || revealed.contains(key);
-            let entity = cx.entity();
-            let key_for_click = key.clone();
-            let key_group = SharedString::from(format!("key-row-{node}"));
-            let mut row = h_flex()
-                .id(SharedString::from(format!("key-{node}")))
-                .group(key_group.clone())
-                .mx_2()
-                .px_2()
-                .h(px(26.))
-                .gap_2()
-                .rounded(px(6.))
-                .items_center()
-                .overflow_hidden()
-                .cursor_pointer()
-                .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-                    entity.update(cx, |this, cx| {
-                        this.zone = Zone::Keys;
-                        this.cursor = row_ix;
-                        if event.click_count >= 2 {
-                            this.begin_value_edit(window, cx);
-                        } else {
-                            cx.notify();
-                        }
-                    });
-                    let _ = key_for_click;
-                });
-            if selected {
-                row = row.bg(theme_accent);
-            }
-            if missing.iter().any(|missing_key| missing_key == key) {
-                row = row.text_color(theme_danger);
-            }
-            let key_label = if *exported {
-                format!("export {key}")
-            } else {
-                key.clone()
-            };
-            let key_color = if !self.key_query.trim().is_empty() {
-                accent
-            } else if selected {
-                accent
-            } else {
-                theme_fg
-            };
-            row = row.child(
-                div()
-                    .id(SharedString::from(format!("key-name-{node}")))
-                    .w(px(280.))
-                    .min_w(px(0.))
-                    .flex_shrink(1.)
-                    .font_family(mono.clone())
-                    .text_sm()
-                    .truncate()
-                    .text_color(key_color)
-                    .tooltip(hover_tip(key_label.clone()))
-                    .child(key_label),
-            );
-            let show_input = editing_node == Some(*node)
-                && self.editor.as_ref().is_some_and(|editor| {
-                    matches!(editor.kind, EditKind::Value | EditKind::Rename)
-                });
-            if show_input {
-                if let Some(editor) = &self.editor {
-                    if matches!(editor.kind, EditKind::Rename) {
-                        if let Some(key_input) = &editor.key {
-                            row = row.child(
-                                div().flex_1().child(
-                                    Input::new(key_input)
-                                        .small()
-                                        .appearance(false)
-                                        .bordered(false),
-                                ),
-                            );
-                        }
-                    } else {
-                        row = row.child(
-                            div().flex_1().child(
-                                Input::new(&editor.value)
-                                    .small()
-                                    .appearance(false)
-                                    .bordered(false)
-                                    .on_paste(block_paste(
-                                        cx.entity().downgrade(),
-                                        self.focus.clone(),
-                                    )),
-                            ),
-                        );
-                    }
-                }
-            } else {
-                let shown = display_value(value, visible);
-                let dim_empty = value.is_empty();
-                let value_tip = if visible {
-                    value.clone()
-                } else {
-                    String::new()
-                };
-                row = row.child(
-                    div()
-                        .id(SharedString::from(format!("key-value-{node}")))
-                        .flex_1()
-                        .min_w(px(0.))
-                        .font_family(mono.clone())
-                        .text_sm()
-                        .truncate()
-                        .text_color(if dim_empty { theme_muted } else { theme_fg })
-                        .when(!value_tip.is_empty(), |cell| {
-                            cell.tooltip(hover_tip(value_tip))
-                        })
-                        .child(shown),
-                );
-            }
-            let copy_entity = cx.entity();
-            let reveal_entity = cx.entity();
-            let mut actions = h_flex()
-                .w(px(56.))
-                .gap(px(1.))
-                .flex_shrink_0()
-                .justify_end()
-                .overflow_hidden();
-            if !selected {
-                actions = actions
-                    .invisible()
-                    .group_hover(key_group, |style| style.visible());
-            }
-            actions = actions
-                .child(
-                    icon_button(
-                        SharedString::from(format!("copy-{node}")),
-                        IconName::Copy,
-                        "Copy value",
-                    )
-                    .on_click(move |_, _, cx| {
-                        copy_entity.update(cx, |this, cx| {
-                            this.zone = Zone::Keys;
-                            this.cursor = row_ix;
-                            this.copy_selected(cx);
-                        });
-                    }),
-                )
-                .child(
-                    icon_button(
-                        SharedString::from(format!("eye-{node}")),
-                        if visible {
-                            IconName::EyeOff
-                        } else {
-                            IconName::Eye
-                        },
-                        if visible { "Hide value" } else { "Show value" },
-                    )
-                    .on_click(move |_, _, cx| {
-                        reveal_entity.update(cx, |this, cx| {
-                            this.zone = Zone::Keys;
-                            this.cursor = row_ix;
-                            this.toggle_reveal(cx);
-                        });
-                    }),
-                );
-            row = row.child(actions);
-            table = table.child(row);
-        }
-        if editing_new {
-            if let Some(editor) = &self.editor {
-                let mut row = h_flex()
-                    .mx_2()
-                    .px_2()
-                    .h(px(28.))
-                    .gap_2()
-                    .rounded(px(6.))
-                    .items_center()
-                    .bg(theme_accent);
-                let paste = block_paste(cx.entity().downgrade(), self.focus.clone());
-                if let Some(key_input) = &editor.key {
-                    row = row.child(
-                        div().w(px(200.)).child(
-                            Input::new(key_input)
-                                .small()
-                                .appearance(false)
-                                .bordered(false)
-                                .on_paste(block_paste(cx.entity().downgrade(), self.focus.clone())),
-                        ),
-                    );
-                }
-                row = row.child(
-                    div().flex_1().child(
-                        Input::new(&editor.value)
-                            .small()
-                            .appearance(false)
-                            .bordered(false)
-                            .on_paste(paste),
-                    ),
-                );
-                table = table.child(row);
-            }
-        }
-
-        let path_label = self
-            .open
-            .as_ref()
-            .map(|open| open.path.display().to_string())
-            .unwrap_or_default();
-        let status = self.status.clone();
-        let hints = if self.diff_open {
-            "Esc close   ] other file   Tab next"
-        } else {
-            match zone {
-                Zone::Projects => "↑↓ move   Enter open   Tab next area",
-                Zone::Tabs => "←→ move   Enter open   Shift+Enter compare",
-                Zone::Keys => "↑↓ move   Enter edit   ← back   Tab next",
-            }
-        };
-        let dirty = self.open.as_ref().is_some_and(|open| open.is_dirty());
-        let toolbar = self.toolbar(cx);
-
-        let mut center = v_flex()
-            .flex_1()
-            .h_full()
-            .min_w(px(0.))
-            .bg(theme_bg)
-            .text_color(theme_fg)
-            .child(tabs)
-            .child(toolbar)
-            .child(if self.diff_open {
-                self.diff_view(theme_fg, theme_muted, theme_border, mono.clone(), cx)
-            } else {
-                v_flex()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .border_2()
-                    .border_color(if zone == Zone::Keys {
-                        accent
-                    } else {
-                        accent.opacity(0.)
-                    })
-                    .child(
-                        div()
-                            .px_2()
-                            .pt_1()
-                            .pb_1()
-                            .child(Input::new(&self.key_filter).small()),
-                    )
-                    .child(div().flex_1().min_h(px(0.)).overflow_hidden().child(table))
-            })
-            .child(
-                h_flex()
-                    .h(px(28.))
-                    .px_3()
-                    .gap_3()
-                    .items_center()
-                    .border_t_1()
-                    .border_color(theme_border)
-                    .text_xs()
-                    .text_color(theme_muted)
-                    .when(dirty, |bar| {
-                        bar.child(
-                            div()
-                                .id("unsaved-dot")
-                                .size(px(6.))
-                                .rounded(px(99.))
-                                .bg(cx.theme().warning)
-                                .tooltip(hover_tip("Unsaved changes")),
-                        )
-                    })
-                    .child(div().flex_1().overflow_hidden().whitespace_nowrap().child(
-                        if status.is_empty() {
-                            path_label
-                        } else {
-                            status
-                        },
-                    ))
-                    .child(div().child(hints)),
-            );
-
-        if self.booting && self.projects.is_empty() {
-            center = v_flex()
+        let sidebar = self.render_sidebar(p, window, cx);
+        let center = if self.booting && self.projects.is_empty() {
+            v_flex()
                 .flex_1()
                 .h_full()
                 .items_center()
                 .justify_center()
-                .bg(theme_bg)
-                .text_color(theme_muted)
-                .child("Starting");
+                .gap(px(8.))
+                .bg(p.bg_canvas)
+                .text_color(p.fg_tertiary)
+                .child(
+                    Icon::new(IconName::LoaderCircle)
+                        .size(px(18.))
+                        .text_color(p.accent),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .line_height(px(18.))
+                        .child("Starting"),
+                )
         } else if self.projects.is_empty() && !self.scanning {
-            let entity = cx.entity();
-            center = v_flex()
+            self.render_empty_state(p, mono.clone(), cx)
+        } else if self.open.is_none() && !self.diff_open {
+            let tabs = self.render_tabs(p, mono.clone(), cx);
+            let footer = self.render_footer(p, mono.clone());
+            v_flex()
                 .flex_1()
                 .h_full()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .bg(theme_bg)
-                .text_color(theme_fg)
-                .child(gpui_kit::component::Icon::new(IconName::FolderPlus).large())
+                .min_w(px(0.))
+                .bg(p.bg_canvas)
+                .text_color(p.fg_primary)
+                .child(tabs)
                 .child(
-                    div()
-                        .text_lg()
-                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                        .child("Add a folder"),
+                    v_flex()
+                        .flex_1()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(6.))
+                        .text_color(p.fg_tertiary)
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .line_height(px(18.))
+                                .child("Select a file"),
+                        ),
                 )
-                .child(
-                    div()
-                        .w(px(360.))
-                        .text_sm()
-                        .text_center()
-                        .text_color(theme_muted)
-                        .child("Add a folder to list its .env files."),
-                )
-                .child(
-                    icon_button("welcome-add", IconName::FolderPlus, "Add folder").on_click(
-                        move |_, window, cx| {
-                            entity.update(cx, |this, cx| this.open_add_folder(window, cx));
-                        },
-                    ),
-                )
-                .child(div().text_xs().text_color(theme_muted).child("Ctrl+O"));
-        } else if self.open.is_none() {
-            center = v_flex()
+                .child(footer)
+        } else {
+            let missing = self.missing_names();
+            let tabs = self.render_tabs(p, mono.clone(), cx);
+            let toolbar = self.render_toolbar(p, missing.len(), cx);
+            let body = if self.diff_open {
+                self.render_diff_view(p, mono.clone(), cx)
+            } else {
+                self.render_key_table(p, mono.clone(), window, cx)
+            };
+            let footer = self.render_footer(p, mono.clone());
+            v_flex()
                 .flex_1()
                 .h_full()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .bg(theme_bg)
-                .text_color(theme_muted)
-                .child("Select a file");
-        }
+                .min_w(px(0.))
+                .bg(p.bg_canvas)
+                .text_color(p.fg_primary)
+                .child(tabs)
+                .child(toolbar)
+                .child(body)
+                .child(footer)
+        };
 
         let mut root = h_flex()
             .id("envy-root")
@@ -3241,8 +2733,8 @@ impl Render for EnvyApp {
             .flex_1()
             .w_full()
             .min_h(px(0.))
-            .bg(theme_bg)
-            .text_color(theme_fg)
+            .bg(p.bg_canvas)
+            .text_color(p.fg_primary)
             .font_family(ui_font)
             .overflow_hidden()
             .on_action(cx.listener(|this, _: &MoveDown, window, cx| this.move_delta(1, window, cx)))
@@ -3305,17 +2797,17 @@ impl Render for EnvyApp {
             .child(center);
 
         if !matches!(self.overlay, Overlay::None) {
-            root = root.child(self.overlay_view(window, cx));
+            root = root.child(self.overlay_view(p, mono, window, cx));
         }
 
         v_flex()
             .size_full()
-            .bg(theme_bg)
-            .text_color(theme_fg)
+            .bg(p.bg_canvas)
+            .text_color(p.fg_primary)
             .child(
                 TitleBar::new().child(
                     h_flex()
-                        .gap_2()
+                        .gap(px(8.))
                         .items_center()
                         .child(
                             gpui_kit::img(app_mark())
@@ -3325,8 +2817,10 @@ impl Render for EnvyApp {
                         )
                         .child(
                             div()
-                                .text_sm()
-                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                .text_size(px(13.))
+                                .line_height(px(18.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(p.fg_primary)
                                 .child("Envy"),
                         ),
                 ),
@@ -3336,117 +2830,1696 @@ impl Render for EnvyApp {
 }
 
 impl EnvyApp {
-    fn diff_view(
+    fn render_sidebar(
         &self,
-        fg: impl Clone + Into<gpui_kit::Hsla>,
-        muted: impl Clone + Into<gpui_kit::Hsla>,
-        border: impl Clone + Into<gpui_kit::Hsla>,
+        p: Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        let project_rows = self.projects.clone();
+        let visible_projects = self.visible_project_indexes();
+        let project_ix = self.project_ix;
+        let zone = self.zone;
+        let list_focused =
+            zone == Zone::Projects && !self.filter_focused(Zone::Projects, window, cx);
+        let entity = cx.entity();
+
+        let count_text = if self.scanning {
+            files_found_label(self.scan_found)
+        } else if project_rows.is_empty() {
+            String::new()
+        } else if visible_projects.len() != project_rows.len() {
+            format!("{}/{}", visible_projects.len(), project_rows.len())
+        } else {
+            project_rows.len().to_string()
+        };
+
+        let mut header_left = h_flex().gap(px(6.)).items_center().min_w(px(0.)).child(
+            div()
+                .text_size(px(11.))
+                .line_height(px(14.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(p.fg_tertiary)
+                .child("PROJECTS"),
+        );
+        if self.scanning {
+            header_left = header_left
+                .child(
+                    Icon::new(IconName::LoaderCircle)
+                        .size(px(12.))
+                        .text_color(p.accent),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .line_height(px(14.))
+                        .text_color(p.fg_secondary)
+                        .child(count_text),
+                );
+        } else if !count_text.is_empty() {
+            header_left = header_left.child(
+                div()
+                    .px(px(5.))
+                    .py(px(1.))
+                    .rounded(px(4.))
+                    .bg(p.bg_kbd)
+                    .text_size(px(10.5))
+                    .line_height(px(13.))
+                    .text_color(p.fg_tertiary)
+                    .child(count_text),
+            );
+        }
+
+        let header = h_flex()
+            .px(px(12.))
+            .h(SIDEBAR_HEADER_H)
+            .flex_shrink_0()
+            .items_center()
+            .justify_between()
+            .child(header_left)
+            .child(
+                h_flex()
+                    .gap(px(2.))
+                    .items_center()
+                    .child(
+                        toolbar_icon_button(
+                            "sb-refresh",
+                            IconName::RefreshCw,
+                            "Rescan folders",
+                            false,
+                            false,
+                            p,
+                        )
+                        .tooltip_with_action("Rescan folders", &Refresh, Some("Envy"))
+                        .on_click({
+                            let entity = entity.clone();
+                            move |_, _, cx| {
+                                entity.update(cx, |this, cx| {
+                                    this.begin_scan(false, cx);
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                    )
+                    .child(
+                        toolbar_icon_button(
+                            "add-folder",
+                            IconName::FolderPlus,
+                            "Add folder",
+                            false,
+                            false,
+                            p,
+                        )
+                        .tooltip_with_action("Add folder", &AddFolder, Some("Envy"))
+                        .on_click({
+                            let entity = entity.clone();
+                            move |_, window, cx| {
+                                entity.update(cx, |this, cx| this.open_add_folder(window, cx));
+                            }
+                        }),
+                    ),
+            );
+
+        let search_box = div().px(px(8.)).pb(px(8.)).flex_shrink_0().child(
+            Input::new(&self.project_filter)
+                .small()
+                .cleanable(true)
+                .prefix(
+                    Icon::new(IconName::Search)
+                        .size(px(13.))
+                        .text_color(p.fg_tertiary),
+                ),
+        );
+
+        let mut project_list = v_flex()
+            .id("project-list")
+            .size_full()
+            .py(px(4.))
+            .gap(px(2.))
+            .overflow_y_scroll()
+            .track_scroll(&self.project_scroll);
+
+        if self.booting && project_rows.is_empty() {
+            project_list = project_list.child(
+                div()
+                    .px(px(12.))
+                    .py(px(8.))
+                    .text_size(px(12.))
+                    .line_height(px(16.))
+                    .text_color(p.fg_tertiary)
+                    .child("Starting"),
+            );
+        } else if project_rows.is_empty() && !self.scanning {
+            project_list = project_list.child(
+                div()
+                    .px(px(12.))
+                    .py(px(8.))
+                    .text_size(px(12.))
+                    .line_height(px(16.))
+                    .text_color(p.fg_tertiary)
+                    .child("No folders added yet."),
+            );
+        } else if !project_rows.is_empty() && visible_projects.is_empty() {
+            project_list = project_list.child(
+                div()
+                    .px(px(12.))
+                    .py(px(8.))
+                    .text_size(px(12.))
+                    .line_height(px(16.))
+                    .text_color(p.fg_tertiary)
+                    .child("No matching projects."),
+            );
+        }
+
+        for (visible_ix, index) in visible_projects.iter().copied().enumerate() {
+            let project = &project_rows[index];
+            let selected = project_ix == Some(index);
+            let favorite = self.config.is_favorite(&project.root);
+            let branch = display_branch(&project.branch).map(str::to_string);
+            let entity = entity.clone();
+            let star_entity = entity.clone();
+            let group = SharedString::from(format!("project-row-{index}"));
+
+            let row_bg = if selected && list_focused {
+                Some(p.bg_selected_accent)
+            } else if selected {
+                Some(p.bg_selected_muted)
+            } else {
+                None
+            };
+
+            let mut row = h_flex()
+                .id(SharedString::from(format!("project-{visible_ix}")))
+                .group(group.clone())
+                .mx(px(4.))
+                .px(px(8.))
+                .h(SIDEBAR_ROW_H)
+                .flex_shrink_0()
+                .gap(px(8.))
+                .rounded(px(6.))
+                .items_center()
+                .overflow_hidden()
+                .cursor_pointer()
+                .tooltip(hover_tip(format!(
+                    "{} · {}",
+                    project.name,
+                    project.root.display()
+                )))
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.zone = Zone::Projects;
+                        this.remember_project(index, cx);
+                        this.select_project(index, false, window, cx);
+                    });
+                });
+
+            if let Some(bg) = row_bg {
+                row = row.bg(bg);
+            } else {
+                row = row.hover(move |style| style.bg(p.bg_hover));
+            }
+
+            row = row.child(
+                div()
+                    .size(px(6.))
+                    .rounded(px(999.))
+                    .flex_shrink_0()
+                    .when(project.missing_vs_example, |dot| dot.bg(p.warning_dot)),
+            );
+
+            let mut text_col = v_flex()
+                .flex_1()
+                .min_w(px(0.))
+                .justify_center()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .line_height(px(18.))
+                        .font_weight(if selected {
+                            FontWeight::MEDIUM
+                        } else {
+                            FontWeight::NORMAL
+                        })
+                        .truncate()
+                        .text_color(if selected && list_focused {
+                            p.accent
+                        } else {
+                            p.fg_primary
+                        })
+                        .child(project.name.clone()),
+                );
+
+            if let Some(branch_name) = branch {
+                text_col = text_col.child(
+                    h_flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .min_w(px(0.))
+                        .child(
+                            Icon::new(IconName::GitBranch)
+                                .size(px(11.))
+                                .text_color(p.fg_tertiary),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .text_size(px(11.))
+                                .line_height(px(14.))
+                                .text_color(p.fg_tertiary)
+                                .truncate()
+                                .child(branch_name),
+                        ),
+                );
+            }
+
+            row = row.child(text_col);
+
+            let mut star = div()
+                .w(px(24.))
+                .h(px(24.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .flex_shrink_0();
+            if !favorite {
+                star = star.invisible().group_hover(group, |style| style.visible());
+            }
+            row = row.child(
+                star.child(
+                    row_icon_button(
+                        SharedString::from(format!("pin-{index}")),
+                        if favorite {
+                            IconName::StarFill
+                        } else {
+                            IconName::Star
+                        },
+                        if favorite {
+                            "Unpin project"
+                        } else {
+                            "Pin project"
+                        },
+                    )
+                    .text_color(if favorite { p.accent } else { p.fg_tertiary })
+                    .on_click(move |_, _, cx| {
+                        star_entity.update(cx, |this, cx| {
+                            this.project_ix = Some(index);
+                            this.toggle_favorite_selected(cx);
+                        });
+                    }),
+                ),
+            );
+
+            project_list = project_list.child(row);
+        }
+
+        v_flex()
+            .w(SIDEBAR_W)
+            .flex_shrink_0()
+            .h_full()
+            .bg(p.bg_chrome)
+            .text_color(p.fg_primary)
+            .border_r_1()
+            .border_color(p.border_hairline)
+            .child(header)
+            .when(!self.config.folders.is_empty(), |sidebar| {
+                sidebar.child(search_box)
+            })
+            .child(
+                div()
+                    .id("project-scroll-host")
+                    .relative()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .mx(px(4.))
+                    .mb(px(4.))
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(if list_focused {
+                        p.accent_ring
+                    } else {
+                        p.bg_chrome.opacity(0.)
+                    })
+                    .overflow_hidden()
+                    .child(project_list)
+                    .child(Scrollbar::vertical(&self.project_scroll).mode(ScrollbarMode::Hover)),
+            )
+    }
+
+    fn render_tabs(
+        &self,
+        p: Palette,
+        mono: SharedString,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let file_tabs = self
+            .project_ix
+            .and_then(|ix| self.projects.get(ix))
+            .map(|project| project.files.clone())
+            .unwrap_or_default();
+        let file_ix = self.file_ix;
+        let zone = self.zone;
+        let dirty = self.open.as_ref().is_some_and(|open| open.is_dirty());
+        let can_compare = file_tabs.len() >= 2;
+
+        let mut tabs = h_flex()
+            .id("file-tabs")
+            .w_full()
+            .h(TAB_BAR_H)
+            .flex_shrink_0()
+            .px(px(8.))
+            .gap(px(2.))
+            .items_end()
+            .bg(p.bg_chrome)
+            .border_b_1()
+            .border_color(p.border_hairline)
+            .overflow_x_scroll();
+
+        for (index, file) in file_tabs.iter().enumerate() {
+            let is_left = self.diff_open && self.diff_left == Some(index);
+            let is_right = self.diff_open && self.diff_right == Some(index);
+            let is_active = if self.diff_open {
+                is_left || is_right
+            } else {
+                file_ix == Some(index)
+            };
+            let is_open_dirty = file_ix == Some(index) && dirty;
+            let cursor_tab = zone == Zone::Tabs && self.tab_cursor == index;
+            let entity = cx.entity();
+            let name = file.name.clone();
+
+            let mut tip_parts = vec![name.clone()];
+            if file.prod {
+                tip_parts.push("Production".into());
+            }
+            if is_open_dirty {
+                tip_parts.push("Unsaved changes".into());
+            } else if file.missing_vs_example {
+                tip_parts.push("Missing keys vs .env.example".into());
+            }
+            if can_compare && !self.diff_open && file_ix != Some(index) {
+                tip_parts.push("Ctrl+click to compare".into());
+            }
+            let tip = tip_parts.join(" · ");
+
+            let mut tab = h_flex()
+                .id(SharedString::from(format!("file-{index}")))
+                .relative()
+                .h(px(33.))
+                .px(px(12.))
+                .gap(px(6.))
+                .items_center()
+                .rounded_t(px(6.))
+                .cursor_pointer()
+                .font_family(mono.clone())
+                .text_size(px(12.5))
+                .line_height(px(16.))
+                .font_weight(if is_active {
+                    FontWeight::MEDIUM
+                } else {
+                    FontWeight::NORMAL
+                })
+                .text_color(if is_active || cursor_tab {
+                    p.fg_primary
+                } else {
+                    p.fg_secondary
+                })
+                .tooltip(hover_tip(tip))
+                .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.zone = Zone::Tabs;
+                        this.tab_cursor = index;
+                        if event.modifiers.control || event.modifiers.shift {
+                            this.toggle_compare_tab(index, cx);
+                        } else {
+                            this.activate_tab(index, false, window, cx);
+                        }
+                    });
+                });
+
+            if cursor_tab {
+                tab = tab
+                    .bg(p.accent_subtle)
+                    .border_1()
+                    .border_color(p.accent_ring);
+            } else if is_active {
+                tab = tab
+                    .bg(p.bg_canvas)
+                    .border_t_1()
+                    .border_l_1()
+                    .border_r_1()
+                    .border_color(p.border_hairline);
+            } else {
+                tab = tab.hover(move |style| style.bg(p.bg_hover).text_color(p.fg_primary));
+            }
+
+            if is_left || is_right {
+                let side_tag = if is_left { "L" } else { "R" };
+                tab = tab.child(
+                    div()
+                        .px(px(4.))
+                        .py(px(1.))
+                        .rounded(px(4.))
+                        .bg(p.accent_subtle)
+                        .text_size(px(10.))
+                        .line_height(px(12.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(p.accent)
+                        .child(side_tag),
+                );
+            }
+
+            if file.prod {
+                tab = tab.child(
+                    div()
+                        .size(px(6.))
+                        .rounded(px(999.))
+                        .bg(p.prod_dot)
+                        .flex_shrink_0(),
+                );
+            }
+
+            tab = tab.child(div().truncate().child(name));
+
+            if is_open_dirty {
+                tab = tab.child(
+                    div()
+                        .size(px(6.))
+                        .rounded(px(999.))
+                        .bg(p.warning_dot)
+                        .flex_shrink_0(),
+                );
+            } else if file.missing_vs_example {
+                tab = tab.child(
+                    div()
+                        .size(px(5.))
+                        .rounded(px(999.))
+                        .bg(p.warning_dot.opacity(0.65))
+                        .flex_shrink_0(),
+                );
+            }
+
+            if is_active {
+                tab = tab.child(
+                    div()
+                        .absolute()
+                        .bottom_0()
+                        .left(px(6.))
+                        .right(px(6.))
+                        .h(px(2.))
+                        .rounded(px(2.))
+                        .bg(p.accent),
+                );
+            }
+
+            tabs = tabs.child(tab);
+        }
+
+        tabs
+    }
+
+    fn render_toolbar(
+        &self,
+        p: Palette,
+        missing_count: usize,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        let entity = cx.entity();
+        let show_all = self.show_all;
+        let diff_open = self.diff_open;
+        let dirty = self.open.as_ref().is_some_and(|open| open.is_dirty());
+        let can_undo = self.open.as_ref().is_some_and(|open| open.can_undo());
+        let can_redo = self.open.as_ref().is_some_and(|open| open.can_redo());
+        let has_open = self.open.is_some();
+        let file_count = self.file_count();
+        let has_example = self
+            .project_ix
+            .and_then(|ix| self.projects.get(ix))
+            .is_some_and(|project| project.files.iter().any(|f| is_example_filename(&f.name)));
+
+        let left_side = if diff_open {
+            let mut left = h_flex().items_center().gap(px(8.)).flex_1().min_w(px(0.));
+            left = left.child(
+                toolbar_icon_button(
+                    "tb-diff-close",
+                    IconName::X,
+                    "Close compare · Esc",
+                    false,
+                    false,
+                    p,
+                )
+                .on_click({
+                    let entity = entity.clone();
+                    move |_, window, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.clear_compare();
+                            this.focus_self(window, cx);
+                            cx.notify();
+                        });
+                    }
+                }),
+            );
+            if let Some(report) = &self.diff_report {
+                let mut different = 0usize;
+                let mut only_left = 0usize;
+                let mut only_right = 0usize;
+                for row in &report.rows {
+                    match row.kind {
+                        diff::DiffKind::Different => different += 1,
+                        diff::DiffKind::OnlyLeft => only_left += 1,
+                        diff::DiffKind::OnlyRight => only_right += 1,
+                        diff::DiffKind::Same => {}
+                    }
+                }
+                if different == 0 && only_left == 0 && only_right == 0 {
+                    left = left.child(
+                        div()
+                            .px(px(8.))
+                            .py(px(2.))
+                            .rounded(px(999.))
+                            .bg(p.accent_subtle)
+                            .text_size(px(11.5))
+                            .line_height(px(16.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(p.accent)
+                            .child("Files match"),
+                    );
+                } else {
+                    if different > 0 {
+                        left = left.child(summary_pill(
+                            format!("{different} differ"),
+                            p.warning,
+                            p.warning_bg,
+                            p.warning_border,
+                        ));
+                    }
+                    if only_left > 0 {
+                        left = left.child(summary_pill(
+                            format!("{only_left} left only"),
+                            p.accent,
+                            p.accent_subtle,
+                            p.accent_ring,
+                        ));
+                    }
+                    if only_right > 0 {
+                        left = left.child(summary_pill(
+                            format!("{only_right} right only"),
+                            p.danger,
+                            p.danger_bg,
+                            p.danger_border,
+                        ));
+                    }
+                }
+            }
+            if file_count >= 3 {
+                left = left.child(
+                    toolbar_icon_button(
+                        "tb-diff-cycle",
+                        IconName::ArrowLeftRight,
+                        "Compare another file",
+                        false,
+                        false,
+                        p,
+                    )
+                    .tooltip_with_action("Compare another file", &CycleDiff, Some("Envy"))
+                    .on_click({
+                        let entity = entity.clone();
+                        move |_, _, cx| {
+                            entity.update(cx, |this, cx| this.cycle_diff(cx));
+                        }
+                    }),
+                );
+            }
+            left
+        } else {
+            let total = self.entry_nodes().len();
+            let shown = self.visible_entry_nodes().len();
+            let count_label = if !self.key_query.trim().is_empty() {
+                format!("{shown} of {total}")
+            } else if total == 1 {
+                "1 key".to_string()
+            } else {
+                format!("{total} keys")
+            };
+
+            let mut left = h_flex()
+                .items_center()
+                .gap(px(8.))
+                .flex_1()
+                .min_w(px(0.))
+                .child(
+                    div().w(px(220.)).flex_shrink_0().child(
+                        Input::new(&self.key_filter).small().cleanable(true).prefix(
+                            Icon::new(IconName::Search)
+                                .size(px(13.))
+                                .text_color(p.fg_tertiary),
+                        ),
+                    ),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .line_height(px(16.))
+                        .text_color(p.fg_tertiary)
+                        .whitespace_nowrap()
+                        .child(count_label),
+                );
+
+            if missing_count > 0 {
+                let compare_entity = entity.clone();
+                left = left.child(
+                    h_flex()
+                        .id("missing-vs-example-pill")
+                        .h(px(24.))
+                        .px(px(8.))
+                        .gap(px(5.))
+                        .items_center()
+                        .rounded(px(999.))
+                        .bg(p.warning_bg)
+                        .border_1()
+                        .border_color(p.warning_border)
+                        .text_size(px(11.5))
+                        .line_height(px(15.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(p.warning)
+                        .cursor_pointer()
+                        .hover(move |style| style.bg(p.warning.opacity(0.16)))
+                        .tooltip(hover_tip("Compare with .env.example"))
+                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                            compare_entity.update(cx, |this, cx| this.compare_with_example(cx));
+                        })
+                        .child(
+                            Icon::new(IconName::Info)
+                                .size(px(12.))
+                                .text_color(p.warning),
+                        )
+                        .child(format!("{missing_count} missing vs .env.example")),
+                );
+            }
+
+            left
+        };
+
+        let right_side = h_flex()
+            .items_center()
+            .gap(px(4.))
+            .flex_shrink_0()
+            .child(
+                toolbar_icon_button("tb-new", IconName::Plus, "New key", false, !has_open, p)
+                    .tooltip_with_action("New key", &NewKey, Some("Envy"))
+                    .on_click({
+                        let entity = entity.clone();
+                        move |_, window, cx| {
+                            entity.update(cx, |this, cx| this.begin_new_key(window, cx));
+                        }
+                    }),
+            )
+            .child(
+                toolbar_icon_button("tb-undo", IconName::Undo2, "Undo", false, !can_undo, p)
+                    .tooltip_with_action("Undo", &UndoChange, Some("Envy"))
+                    .on_click({
+                        let entity = entity.clone();
+                        move |_, _, cx| {
+                            entity.update(cx, |this, cx| this.undo(cx));
+                        }
+                    }),
+            )
+            .child(
+                toolbar_icon_button("tb-redo", IconName::Redo2, "Redo", false, !can_redo, p)
+                    .tooltip_with_action("Redo", &RedoChange, Some("Envy"))
+                    .on_click({
+                        let entity = entity.clone();
+                        move |_, _, cx| {
+                            entity.update(cx, |this, cx| this.redo(cx));
+                        }
+                    }),
+            )
+            .child(
+                toolbar_icon_button("tb-save", IconName::Save, "Save", dirty, !dirty, p)
+                    .tooltip_with_action("Save", &Save, Some("Envy"))
+                    .on_click({
+                        let entity = entity.clone();
+                        move |_, _, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.save_open(cx);
+                                cx.notify();
+                            });
+                        }
+                    }),
+            )
+            .child(v_divider(p))
+            .child(
+                toolbar_icon_button(
+                    "tb-eye",
+                    if show_all {
+                        IconName::EyeOff
+                    } else {
+                        IconName::Eye
+                    },
+                    if show_all {
+                        "Hide all values"
+                    } else {
+                        "Show all values"
+                    },
+                    show_all,
+                    false,
+                    p,
+                )
+                .tooltip_with_action(
+                    if show_all {
+                        "Hide all values"
+                    } else {
+                        "Show all values"
+                    },
+                    &RevealAll,
+                    Some("Envy"),
+                )
+                .on_click({
+                    let entity = entity.clone();
+                    move |_, _, cx| {
+                        entity.update(cx, |this, cx| this.toggle_show_all(cx));
+                    }
+                }),
+            )
+            .child(
+                toolbar_icon_button(
+                    "tb-diff",
+                    IconName::Columns2,
+                    if diff_open {
+                        "Close compare"
+                    } else {
+                        "Compare two files"
+                    },
+                    diff_open,
+                    file_count < 2,
+                    p,
+                )
+                .tooltip_with_action("Compare two files", &ToggleDiff, Some("Envy"))
+                .on_click({
+                    let entity = entity.clone();
+                    move |_, _, cx| {
+                        entity.update(cx, |this, cx| this.toggle_diff(cx));
+                    }
+                }),
+            )
+            .child(
+                toolbar_icon_button(
+                    "tb-example",
+                    IconName::FilePlus,
+                    "New .env.local from example",
+                    false,
+                    !has_example,
+                    p,
+                )
+                .tooltip_with_action("New .env.local from example", &NewFromExample, Some("Envy"))
+                .on_click({
+                    let entity = entity.clone();
+                    move |_, _, cx| {
+                        entity.update(cx, |this, cx| this.new_from_example(cx));
+                    }
+                }),
+            )
+            .child(v_divider(p))
+            .child(
+                toolbar_icon_button(
+                    "tb-shortcuts",
+                    IconName::Keyboard,
+                    "Keyboard shortcuts",
+                    false,
+                    false,
+                    p,
+                )
+                .tooltip_with_action("Keyboard shortcuts", &ShowShortcuts, Some("Envy"))
+                .on_click({
+                    let entity = entity.clone();
+                    move |_, window, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.overlay = Overlay::Shortcuts;
+                            this.focus_self(window, cx);
+                            cx.notify();
+                        });
+                    }
+                }),
+            )
+            .child(
+                toolbar_icon_button(
+                    "tb-settings",
+                    IconName::Settings,
+                    "Settings",
+                    false,
+                    false,
+                    p,
+                )
+                .tooltip_with_action("Settings", &OpenSettings, Some("Envy"))
+                .on_click({
+                    let entity = entity.clone();
+                    move |_, window, cx| {
+                        entity.update(cx, |this, cx| this.open_settings(window, cx));
+                    }
+                }),
+            );
+
+        h_flex()
+            .h(TOOLBAR_H)
+            .flex_shrink_0()
+            .px(px(12.))
+            .gap(px(12.))
+            .items_center()
+            .justify_between()
+            .bg(p.bg_canvas)
+            .border_b_1()
+            .border_color(p.border_hairline)
+            .child(left_side)
+            .child(right_side)
+    }
+
+    fn render_key_table(
+        &self,
+        p: Palette,
+        mono: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        let nodes = self.visible_entry_nodes();
+        let cursor = self.cursor;
+        let show_all = self.show_all;
+        let revealed = self.revealed.clone();
+        let keys_focused = self.zone == Zone::Keys && !self.filter_focused(Zone::Keys, window, cx);
+        let editing_node = self.editor.as_ref().and_then(|editor| editor.node);
+        let editing_new = self
+            .editor
+            .as_ref()
+            .is_some_and(|editor| matches!(editor.kind, EditKind::New));
+        let query_active = !self.key_query.trim().is_empty();
+        let entity = cx.entity();
+
+        let rows_src: Vec<(usize, String, String, bool)> = nodes
+            .iter()
+            .filter_map(|node| {
+                let open = self.open.as_ref()?;
+                match open.document.nodes.get(*node)? {
+                    Node::Entry(entry) => Some((
+                        *node,
+                        entry.key.clone(),
+                        entry.value.clone(),
+                        entry.exported,
+                    )),
+                    Node::Verbatim(_) => None,
+                }
+            })
+            .collect();
+
+        let col_header = h_flex()
+            .h(COL_HEADER_H)
+            .flex_shrink_0()
+            .px(px(16.))
+            .items_center()
+            .bg(p.bg_chrome.opacity(0.55))
+            .border_b_1()
+            .border_color(p.border_hairline)
+            .child(
+                div()
+                    .w(KEY_COL_W)
+                    .flex_shrink_0()
+                    .pr(px(16.))
+                    .text_size(px(11.))
+                    .line_height(px(14.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(p.fg_tertiary)
+                    .child("KEY"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .text_size(px(11.))
+                    .line_height(px(14.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(p.fg_tertiary)
+                    .child("VALUE"),
+            )
+            .child(div().w(KEY_ACTIONS_W).flex_shrink_0());
+
+        let mut table = v_flex()
+            .id("key-table")
+            .size_full()
+            .py(px(4.))
+            .gap(px(1.))
+            .overflow_y_scroll()
+            .track_scroll(&self.key_scroll);
+
+        if rows_src.is_empty() && !editing_new && self.open.is_some() {
+            let note = if query_active {
+                "No matching keys."
+            } else {
+                "No keys in this file. Press N to add one."
+            };
+            table = table.child(
+                div()
+                    .px(px(16.))
+                    .py(px(24.))
+                    .text_size(px(13.))
+                    .line_height(px(18.))
+                    .text_color(p.fg_tertiary)
+                    .child(note),
+            );
+        }
+
+        for (row_ix, (node, key, value, exported)) in rows_src.iter().enumerate() {
+            let selected = cursor == row_ix;
+            let visible = show_all || revealed.contains(key);
+            let click_entity = entity.clone();
+            let copy_entity = entity.clone();
+            let reveal_entity = entity.clone();
+            let key_group = SharedString::from(format!("key-row-{node}"));
+
+            let show_value_input = editing_node == Some(*node)
+                && self
+                    .editor
+                    .as_ref()
+                    .is_some_and(|editor| matches!(editor.kind, EditKind::Value));
+            let show_rename_input = editing_node == Some(*node)
+                && self
+                    .editor
+                    .as_ref()
+                    .is_some_and(|editor| matches!(editor.kind, EditKind::Rename));
+            let editing_this = show_value_input || show_rename_input;
+
+            let row_bg = if editing_this || (selected && keys_focused) {
+                Some(p.bg_selected_accent)
+            } else if selected {
+                Some(p.bg_selected_muted)
+            } else {
+                None
+            };
+
+            let mut row = h_flex()
+                .id(SharedString::from(format!("key-{node}")))
+                .group(key_group.clone())
+                .mx(px(4.))
+                .px(px(7.))
+                .h(if editing_this { px(36.) } else { KEY_ROW_H })
+                .flex_shrink_0()
+                .rounded(px(6.))
+                .items_center()
+                .overflow_hidden()
+                .cursor_pointer()
+                .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                    click_entity.update(cx, |this, cx| {
+                        this.zone = Zone::Keys;
+                        this.cursor = row_ix;
+                        if event.click_count >= 2 {
+                            this.begin_value_edit(window, cx);
+                        } else {
+                            this.focus_self(window, cx);
+                            cx.notify();
+                        }
+                    });
+                });
+
+            if let Some(bg) = row_bg {
+                row = row.bg(bg);
+            } else {
+                row = row.hover(move |style| style.bg(p.bg_hover));
+            }
+
+            let key_color = if query_active || (selected && keys_focused) {
+                p.accent
+            } else {
+                p.fg_primary
+            };
+            let full_key_tip = if *exported {
+                format!("export {key}")
+            } else {
+                key.clone()
+            };
+
+            let key_cell = if show_rename_input {
+                if let Some(key_input) = self.editor.as_ref().and_then(|e| e.key.as_ref()) {
+                    div()
+                        .w(KEY_COL_W)
+                        .flex_shrink_0()
+                        .pr(px(12.))
+                        .font_family(mono.clone())
+                        .child(Input::new(key_input).small())
+                        .into_any_element()
+                } else {
+                    div().w(KEY_COL_W).flex_shrink_0().into_any_element()
+                }
+            } else {
+                let mut cell = h_flex()
+                    .id(SharedString::from(format!("key-name-{node}")))
+                    .w(KEY_COL_W)
+                    .flex_shrink_0()
+                    .pr(px(16.))
+                    .min_w(px(0.))
+                    .items_center()
+                    .font_family(mono.clone())
+                    .text_size(px(13.))
+                    .line_height(px(18.))
+                    .tooltip(hover_tip(full_key_tip));
+                if *exported {
+                    cell = cell.child(
+                        div()
+                            .flex_shrink_0()
+                            .text_color(p.fg_tertiary)
+                            .child("export "),
+                    );
+                }
+                cell.child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .truncate()
+                        .text_color(key_color)
+                        .child(key.clone()),
+                )
+                .into_any_element()
+            };
+
+            let value_cell = if show_value_input {
+                if let Some(editor) = &self.editor {
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .pr(px(8.))
+                        .font_family(mono.clone())
+                        .child(
+                            Input::new(&editor.value)
+                                .small()
+                                .on_paste(block_paste(cx.entity().downgrade(), self.focus.clone())),
+                        )
+                        .into_any_element()
+                } else {
+                    div().flex_1().into_any_element()
+                }
+            } else {
+                let shown = display_value(value, visible);
+                let dim_empty = value.is_empty();
+                let value_color = if dim_empty {
+                    p.fg_tertiary
+                } else if visible {
+                    p.fg_primary
+                } else {
+                    p.fg_secondary
+                };
+                let value_tip = if visible && !dim_empty {
+                    value.clone()
+                } else {
+                    String::new()
+                };
+                div()
+                    .id(SharedString::from(format!("key-value-{node}")))
+                    .flex_1()
+                    .min_w(px(0.))
+                    .pr(px(8.))
+                    .font_family(mono.clone())
+                    .text_size(px(13.))
+                    .line_height(px(18.))
+                    .truncate()
+                    .text_color(value_color)
+                    .when(!value_tip.is_empty(), |cell| {
+                        cell.tooltip(hover_tip(value_tip))
+                    })
+                    .child(shown)
+                    .into_any_element()
+            };
+
+            let mut actions = h_flex()
+                .w(KEY_ACTIONS_W)
+                .gap(px(4.))
+                .flex_shrink_0()
+                .items_center()
+                .justify_end();
+            if !selected || !keys_focused {
+                actions = actions
+                    .invisible()
+                    .group_hover(key_group, |style| style.visible());
+            }
+            if !editing_this {
+                actions = actions
+                    .child(
+                        row_icon_button(
+                            SharedString::from(format!("copy-{node}")),
+                            IconName::Copy,
+                            "Copy value · C",
+                        )
+                        .text_color(p.fg_secondary)
+                        .on_click(move |_, _, cx| {
+                            copy_entity.update(cx, |this, cx| {
+                                this.zone = Zone::Keys;
+                                this.cursor = row_ix;
+                                this.copy_selected(cx);
+                            });
+                        }),
+                    )
+                    .child(
+                        row_icon_button(
+                            SharedString::from(format!("eye-{node}")),
+                            if visible {
+                                IconName::EyeOff
+                            } else {
+                                IconName::Eye
+                            },
+                            if visible {
+                                "Hide value · Space"
+                            } else {
+                                "Show value · Space"
+                            },
+                        )
+                        .text_color(if visible { p.accent } else { p.fg_secondary })
+                        .on_click(move |_, _, cx| {
+                            reveal_entity.update(cx, |this, cx| {
+                                this.zone = Zone::Keys;
+                                this.cursor = row_ix;
+                                this.toggle_reveal(cx);
+                            });
+                        }),
+                    );
+            }
+
+            row = row.child(key_cell).child(value_cell).child(actions);
+            table = table.child(row);
+        }
+
+        if editing_new {
+            if let Some(editor) = &self.editor {
+                let mut row = h_flex()
+                    .mx(px(4.))
+                    .mt(px(4.))
+                    .px(px(7.))
+                    .h(px(36.))
+                    .flex_shrink_0()
+                    .rounded(px(6.))
+                    .items_center()
+                    .bg(p.bg_selected_accent);
+                let paste = block_paste(cx.entity().downgrade(), self.focus.clone());
+                if let Some(key_input) = &editor.key {
+                    row = row.child(
+                        div()
+                            .w(KEY_COL_W)
+                            .flex_shrink_0()
+                            .pr(px(12.))
+                            .font_family(mono.clone())
+                            .child(Input::new(key_input).small().on_paste(block_paste(
+                                cx.entity().downgrade(),
+                                self.focus.clone(),
+                            ))),
+                    );
+                }
+                row = row
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .pr(px(8.))
+                            .font_family(mono.clone())
+                            .child(Input::new(&editor.value).small().on_paste(paste)),
+                    )
+                    .child(
+                        div()
+                            .w(KEY_ACTIONS_W)
+                            .flex_shrink_0()
+                            .flex()
+                            .justify_end()
+                            .child(kbd_chip("Enter", p, mono.clone())),
+                    );
+                table = table.child(row);
+            }
+        }
+
+        let mut pane = v_flex().flex_1().min_h(px(0.)).w_full().overflow_hidden();
+
+        if self.open.as_ref().is_some_and(|open| open.external_change) {
+            let reload_entity = entity.clone();
+            let keep_entity = entity.clone();
+            pane = pane.child(
+                h_flex()
+                    .h(px(36.))
+                    .flex_shrink_0()
+                    .px(px(12.))
+                    .gap(px(8.))
+                    .items_center()
+                    .justify_between()
+                    .bg(p.danger_bg)
+                    .border_b_1()
+                    .border_color(p.danger_border)
+                    .child(
+                        h_flex()
+                            .gap(px(8.))
+                            .items_center()
+                            .child(
+                                Icon::new(IconName::TriangleAlert)
+                                    .size(px(14.))
+                                    .text_color(p.danger),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .line_height(px(16.))
+                                    .text_color(p.fg_primary)
+                                    .child("This file changed on disk."),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap(px(6.))
+                            .items_center()
+                            .child(
+                                Button::new("ext-reload")
+                                    .outline()
+                                    .xsmall()
+                                    .label("Reload")
+                                    .on_click(move |_, _, cx| {
+                                        reload_entity
+                                            .update(cx, |this, cx| this.reload_external(cx));
+                                    }),
+                            )
+                            .child(
+                                Button::new("ext-keep")
+                                    .ghost()
+                                    .xsmall()
+                                    .label("Keep mine")
+                                    .on_click(move |_, window, cx| {
+                                        keep_entity.update(cx, |this, cx| this.cancel(window, cx));
+                                    }),
+                            ),
+                    ),
+            );
+        }
+
+        pane.child(col_header).child(
+            div()
+                .id("key-scroll-host")
+                .relative()
+                .flex_1()
+                .min_h(px(0.))
+                .mx(px(4.))
+                .my(px(4.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(if keys_focused {
+                    p.accent_ring
+                } else {
+                    p.bg_canvas.opacity(0.)
+                })
+                .overflow_hidden()
+                .child(table)
+                .child(Scrollbar::vertical(&self.key_scroll).mode(ScrollbarMode::Hover)),
+        )
+    }
+
+    fn render_footer(&self, p: Palette, mono: SharedString) -> gpui_kit::Div {
+        let path_label = self
+            .open
+            .as_ref()
+            .map(|open| open.path.display().to_string())
+            .unwrap_or_default();
+        let status = self.status.clone();
+        let dirty = self.open.as_ref().is_some_and(|open| open.is_dirty());
+
+        let mut left = h_flex().flex_1().min_w(px(0.)).items_center().gap(px(8.));
+        if dirty {
+            left = left.child(
+                div()
+                    .id("unsaved-dot")
+                    .size(px(6.))
+                    .rounded(px(999.))
+                    .bg(p.warning_dot)
+                    .flex_shrink_0()
+                    .tooltip(hover_tip("Unsaved changes · Ctrl+S saves")),
+            );
+        }
+        if !status.is_empty() {
+            left = left.child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .text_size(px(11.5))
+                    .line_height(px(16.))
+                    .text_color(p.fg_secondary)
+                    .truncate()
+                    .child(status),
+            );
+        } else if !path_label.is_empty() {
+            left = left.child(
+                div()
+                    .id("footer-path")
+                    .flex_1()
+                    .min_w(px(0.))
+                    .font_family(mono.clone())
+                    .text_size(px(11.))
+                    .line_height(px(14.))
+                    .text_color(p.fg_tertiary)
+                    .truncate()
+                    .tooltip(hover_tip(path_label.clone()))
+                    .child(path_label),
+            );
+        }
+
+        let hints: &[(&str, &str)] = if self.diff_open {
+            &[
+                ("↑↓", "Move"),
+                ("Space", "Reveal"),
+                ("]", "Other file"),
+                ("Esc", "Close"),
+            ]
+        } else {
+            match self.zone {
+                Zone::Projects => &[
+                    ("↑↓", "Move"),
+                    ("Enter", "Open"),
+                    ("F", "Pin"),
+                    ("Tab", "Next"),
+                    ("?", "Shortcuts"),
+                ],
+                Zone::Tabs => &[
+                    ("←→", "Move"),
+                    ("Enter", "Open"),
+                    ("Shift+Enter", "Compare"),
+                    ("Tab", "Next"),
+                ],
+                Zone::Keys => &[
+                    ("↑↓", "Move"),
+                    ("Enter", "Edit"),
+                    ("Space", "Reveal"),
+                    ("C", "Copy"),
+                    ("?", "Shortcuts"),
+                ],
+            }
+        };
+
+        let mut right = h_flex().flex_shrink_0().items_center().gap(px(12.));
+        for (keys, label) in hints {
+            right = right.child(footer_hint(keys, label, p, mono.clone()));
+        }
+
+        h_flex()
+            .h(FOOTER_H)
+            .flex_shrink_0()
+            .px(px(12.))
+            .gap(px(12.))
+            .items_center()
+            .justify_between()
+            .bg(p.bg_chrome)
+            .border_t_1()
+            .border_color(p.border_hairline)
+            .child(left)
+            .child(right)
+    }
+
+    fn render_empty_state(
+        &self,
+        p: Palette,
         mono: SharedString,
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
-        let fg: gpui_kit::Hsla = fg.into();
-        let muted: gpui_kit::Hsla = muted.into();
-        let border: gpui_kit::Hsla = border.into();
+        let entity = cx.entity();
+        v_flex()
+            .flex_1()
+            .h_full()
+            .items_center()
+            .justify_center()
+            .gap(px(16.))
+            .bg(p.bg_canvas)
+            .text_color(p.fg_primary)
+            .child(
+                div()
+                    .size(px(48.))
+                    .rounded(px(12.))
+                    .bg(p.accent_subtle)
+                    .border_1()
+                    .border_color(p.accent_ring)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        Icon::new(IconName::FolderPlus)
+                            .size(px(22.))
+                            .text_color(p.accent),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_size(px(16.))
+                            .line_height(px(22.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(p.fg_primary)
+                            .child("Add a folder"),
+                    )
+                    .child(
+                        div()
+                            .w(px(340.))
+                            .text_size(px(13.))
+                            .line_height(px(19.))
+                            .text_center()
+                            .text_color(p.fg_secondary)
+                            .child(
+                                "Choose a folder to list and edit its .env files, grouped by project.",
+                            ),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        Button::new("welcome-add")
+                            .primary()
+                            .icon(IconName::FolderPlus)
+                            .label("Add folder")
+                            .on_click(move |_, window, cx| {
+                                entity.update(cx, |this, cx| this.open_add_folder(window, cx));
+                            }),
+                    )
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(
+                                div()
+                                    .text_size(px(11.5))
+                                    .line_height(px(16.))
+                                    .text_color(p.fg_tertiary)
+                                    .child("Or press"),
+                            )
+                            .child(kbd_chip("Ctrl+O", p, mono)),
+                    ),
+            )
+    }
+}
+
+impl EnvyApp {
+    fn render_diff_view(
+        &self,
+        p: Palette,
+        mono: SharedString,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
         let left_name = self.side_name(DiffSide::Left);
         let right_name = self.side_name(DiffSide::Right);
         let one_file = self
             .project_ix
             .and_then(|ix| self.projects.get(ix))
             .is_some_and(|project| project.files.len() < 2);
-        let mut panel = v_flex()
+        let keys_focused = self.zone == Zone::Keys;
+
+        let pane = v_flex()
             .flex_1()
             .min_h(px(0.))
-            .bg(cx.theme().background)
-            .child(
-                h_flex()
-                    .px_3()
-                    .h(px(36.))
-                    .gap_3()
-                    .items_center()
-                    .border_b_1()
-                    .border_color(border)
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_family(mono.clone())
-                            .text_color(cx.theme().primary)
-                            .child(left_name.clone()),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_family(mono.clone())
-                            .text_color(cx.theme().primary)
-                            .child(right_name.clone()),
-                    ),
-            );
+            .w_full()
+            .overflow_hidden()
+            .bg(p.bg_canvas);
+
         if one_file {
-            return panel.child(
+            return pane.child(
                 div()
-                    .p_4()
-                    .text_color(muted)
+                    .p(px(24.))
+                    .text_size(px(13.))
+                    .line_height(px(18.))
+                    .text_color(p.fg_tertiary)
                     .child("This project has one env file."),
             );
         }
-        let missing_left = cx.entity();
-        let missing_right = cx.entity();
-        panel = panel.child(
-            h_flex()
-                .px_3()
-                .py_1()
-                .gap_2()
-                .items_center()
-                .border_b_1()
-                .border_color(border)
-                .child(
-                    icon_button(
-                        "copy-missing-to-left",
-                        IconName::ArrowLeft,
-                        "Copy keys that exist only on the right into the left file",
-                    )
-                    .label("Copy missing")
-                    .on_click(move |_, _, cx| {
-                        missing_left.update(cx, |this, cx| this.copy_missing(DiffSide::Right, cx));
-                    }),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(format!("{left_name}    key    {right_name}")),
-                )
-                .child(
-                    icon_button(
-                        "copy-missing-to-right",
-                        IconName::ArrowRight,
-                        "Copy keys that exist only on the left into the right file",
-                    )
-                    .label("Copy missing")
-                    .on_click(move |_, _, cx| {
-                        missing_right.update(cx, |this, cx| this.copy_missing(DiffSide::Left, cx));
-                    }),
-                ),
-        );
+
         let Some(report) = self.diff_report.clone() else {
-            return panel.child(div().p_3().text_color(muted).child("Comparing"));
+            return pane.child(
+                h_flex()
+                    .p(px(24.))
+                    .gap(px(8.))
+                    .items_center()
+                    .text_size(px(13.))
+                    .text_color(p.fg_tertiary)
+                    .child(
+                        Icon::new(IconName::LoaderCircle)
+                            .size(px(14.))
+                            .text_color(p.accent),
+                    )
+                    .child("Comparing"),
+            );
         };
+
+        let left_only_count = report
+            .rows
+            .iter()
+            .filter(|r| r.kind == diff::DiffKind::OnlyLeft)
+            .count();
+        let right_only_count = report
+            .rows
+            .iter()
+            .filter(|r| r.kind == diff::DiffKind::OnlyRight)
+            .count();
+
+        let missing_left_entity = cx.entity();
+        let missing_right_entity = cx.entity();
+
+        let header = h_flex()
+            .h(DIFF_HEADER_H)
+            .flex_shrink_0()
+            .px(px(16.))
+            .items_center()
+            .bg(p.bg_chrome.opacity(0.65))
+            .border_b_1()
+            .border_color(p.border_hairline)
+            .child(
+                div()
+                    .w(DIFF_KEY_COL_W)
+                    .flex_shrink_0()
+                    .pr(px(12.))
+                    .text_size(px(11.))
+                    .line_height(px(14.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(p.fg_tertiary)
+                    .child("KEY"),
+            )
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .pr(px(8.))
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .min_w(px(0.))
+                            .child(side_badge("L", p))
+                            .child(
+                                div()
+                                    .font_family(mono.clone())
+                                    .text_size(px(12.))
+                                    .line_height(px(16.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(p.fg_primary)
+                                    .truncate()
+                                    .child(left_name.clone()),
+                            ),
+                    )
+                    .when(right_only_count > 0, |bar| {
+                        bar.child(
+                            Button::new("copy-missing-to-left")
+                                .outline()
+                                .xsmall()
+                                .icon(IconName::ArrowLeft)
+                                .label("Copy missing")
+                                .tooltip(format!(
+                                    "Copy {right_only_count} missing into {left_name}"
+                                ))
+                                .on_click(move |_, _, cx| {
+                                    missing_left_entity.update(cx, |this, cx| {
+                                        this.copy_missing(DiffSide::Right, cx);
+                                    });
+                                }),
+                        )
+                    }),
+            )
+            .child(div().w(DIFF_GUTTER_W).flex_shrink_0())
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .pl(px(8.))
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .min_w(px(0.))
+                            .child(side_badge("R", p))
+                            .child(
+                                div()
+                                    .font_family(mono.clone())
+                                    .text_size(px(12.))
+                                    .line_height(px(16.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(p.fg_primary)
+                                    .truncate()
+                                    .child(right_name.clone()),
+                            ),
+                    )
+                    .when(left_only_count > 0, |bar| {
+                        bar.child(
+                            Button::new("copy-missing-to-right")
+                                .outline()
+                                .xsmall()
+                                .icon(IconName::ArrowRight)
+                                .label("Copy missing")
+                                .tooltip(format!(
+                                    "Copy {left_only_count} missing into {right_name}"
+                                ))
+                                .on_click(move |_, _, cx| {
+                                    missing_right_entity.update(cx, |this, cx| {
+                                        this.copy_missing(DiffSide::Left, cx);
+                                    });
+                                }),
+                        )
+                    }),
+            );
+
         let mut body = v_flex()
             .id("diff-body")
-            .flex_1()
-            .min_h(px(0.))
+            .size_full()
+            .py(px(4.))
+            .gap(px(2.))
             .overflow_y_scroll()
-            .p_2()
-            .gap(px(2.));
+            .track_scroll(&self.diff_scroll);
+
+        if report.rows.is_empty() {
+            body = body.child(
+                div()
+                    .px(px(16.))
+                    .py(px(24.))
+                    .text_size(px(13.))
+                    .line_height(px(18.))
+                    .text_color(p.fg_tertiary)
+                    .child("Both files are empty."),
+            );
+        }
+
         for (index, row) in report.rows.iter().enumerate() {
-            let (label, tint) = match row.kind {
-                diff::DiffKind::Same => ("Same", cx.theme().primary.opacity(0.16)),
-                diff::DiffKind::Different => ("Differs", cx.theme().warning.opacity(0.24)),
-                diff::DiffKind::OnlyLeft => ("Left only", cx.theme().primary.opacity(0.08)),
-                diff::DiffKind::OnlyRight => ("Right only", cx.theme().danger.opacity(0.2)),
+            let (status_icon, glyph_color, tint) = match row.kind {
+                diff::DiffKind::Same => (IconName::Equal, p.fg_tertiary, None),
+                diff::DiffKind::Different => {
+                    (IconName::EqualNot, p.warning, Some(p.diff_different_bg))
+                }
+                diff::DiffKind::OnlyLeft => (IconName::Plus, p.accent, Some(p.diff_only_left_bg)),
+                diff::DiffKind::OnlyRight => {
+                    (IconName::Minus, p.danger, Some(p.diff_only_right_bg))
+                }
             };
+            let selected = keys_focused && self.diff_cursor == index;
             let shown = self.visible(&row.key);
+            let left_empty = row.left.as_deref().is_some_and(str::is_empty);
+            let right_empty = row.right.as_deref().is_some_and(str::is_empty);
             let left_text = row
                 .left
                 .as_deref()
@@ -3457,370 +4530,599 @@ impl EnvyApp {
                 .as_deref()
                 .map(|value| display_value(value, shown))
                 .unwrap_or_else(|| "—".into());
+            let left_color = if row.left.is_none() {
+                p.fg_tertiary.opacity(0.6)
+            } else if left_empty {
+                p.fg_tertiary
+            } else if shown {
+                p.fg_primary
+            } else {
+                p.fg_secondary
+            };
+            let right_color = if row.right.is_none() {
+                p.fg_tertiary.opacity(0.6)
+            } else if right_empty {
+                p.fg_tertiary
+            } else if shown {
+                p.fg_primary
+            } else {
+                p.fg_secondary
+            };
+
+            let click_entity = cx.entity();
             let to_right = cx.entity();
             let to_left = cx.entity();
+            let diff_group = SharedString::from(format!("diff-row-group-{index}"));
+            let can_copy_right = row.left.is_some() && row.kind != diff::DiffKind::Same;
+            let can_copy_left = row.right.is_some() && row.kind != diff::DiffKind::Same;
+
             let mut line = h_flex()
                 .id(SharedString::from(format!("diff-row-{index}")))
-                .px_2()
-                .py(px(3.))
-                .gap_2()
-                .items_center()
+                .group(diff_group.clone())
+                .mx(px(4.))
+                .px(px(7.))
+                .h(DIFF_ROW_H)
+                .flex_shrink_0()
                 .rounded(px(6.))
-                .bg(tint)
-                .child(div().w(px(76.)).flex_shrink_0().text_xs().child(label))
+                .items_center()
+                .overflow_hidden()
+                .cursor_pointer()
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    click_entity.update(cx, |this, cx| {
+                        this.zone = Zone::Keys;
+                        this.diff_cursor = index;
+                        this.focus_self(window, cx);
+                        cx.notify();
+                    });
+                });
+
+            if let Some(bg) = tint {
+                line = line.bg(bg);
+            } else {
+                line = line.hover(move |style| style.bg(p.bg_hover.opacity(0.7)));
+            }
+            if selected {
+                line = line.border_1().border_color(p.accent_ring);
+            }
+
+            let key_col = h_flex()
+                .id(SharedString::from(format!("diff-key-{index}")))
+                .w(DIFF_KEY_COL_W)
+                .flex_shrink_0()
+                .pr(px(12.))
+                .gap(px(8.))
+                .items_center()
+                .min_w(px(0.))
+                .tooltip(hover_tip(row.key.clone()))
+                .child(
+                    div()
+                        .w(px(14.))
+                        .h(px(14.))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(Icon::new(status_icon).size(px(12.)).text_color(glyph_color)),
+                )
                 .child(
                     div()
                         .flex_1()
                         .min_w(px(0.))
                         .font_family(mono.clone())
-                        .text_sm()
+                        .text_size(px(13.))
+                        .line_height(px(18.))
                         .truncate()
-                        .text_color(if row.left.is_some() { fg } else { muted })
-                        .child(left_text),
+                        .text_color(if row.kind == diff::DiffKind::Same {
+                            p.fg_secondary
+                        } else {
+                            p.fg_primary
+                        })
+                        .child(row.key.clone()),
                 );
-            if row.left.is_some() {
-                line = line.child(
-                    icon_button(
-                        SharedString::from(format!("diff-to-right-{index}")),
-                        IconName::ArrowRight,
-                        "Copy this value to the right file",
-                    )
-                    .on_click(move |_, _, cx| {
-                        to_right.update(cx, |this, cx| {
-                            this.copy_diff_row(index, DiffSide::Left, cx);
-                        });
-                    }),
-                );
-            }
-            line = line.child(
+
+            let left_col = div()
+                .flex_1()
+                .min_w(px(0.))
+                .pr(px(8.))
+                .font_family(mono.clone())
+                .text_size(px(13.))
+                .line_height(px(18.))
+                .truncate()
+                .text_color(left_color)
+                .child(left_text);
+
+            let right_slot = if can_copy_right {
                 div()
-                    .id(SharedString::from(format!("diff-key-{index}")))
-                    .w(px(168.))
-                    .min_w(px(0.))
-                    .flex_shrink_0()
-                    .font_family(mono.clone())
-                    .text_sm()
-                    .truncate()
-                    .tooltip(hover_tip(row.key.clone()))
-                    .child(row.key.clone()),
-            );
-            if row.right.is_some() {
-                line = line.child(
-                    icon_button(
-                        SharedString::from(format!("diff-to-left-{index}")),
-                        IconName::ArrowLeft,
-                        "Copy this value to the left file",
+                    .w(px(24.))
+                    .h(px(24.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        row_icon_button(
+                            SharedString::from(format!("diff-to-right-{index}")),
+                            IconName::ArrowRight,
+                            format!("Copy to {right_name}"),
+                        )
+                        .text_color(p.fg_secondary)
+                        .on_click(move |_, _, cx| {
+                            to_right.update(cx, |this, cx| {
+                                this.copy_diff_row(index, DiffSide::Left, cx);
+                            });
+                        }),
                     )
-                    .on_click(move |_, _, cx| {
-                        to_left.update(cx, |this, cx| {
-                            this.copy_diff_row(index, DiffSide::Right, cx);
-                        });
-                    }),
-                );
-            }
-            line = line.child(
+            } else {
+                div().w(px(24.)).h(px(24.))
+            };
+
+            let left_slot = if can_copy_left {
                 div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .font_family(mono.clone())
-                    .text_sm()
-                    .truncate()
-                    .text_color(if row.right.is_some() { fg } else { muted })
-                    .child(right_text),
-            );
+                    .w(px(24.))
+                    .h(px(24.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        row_icon_button(
+                            SharedString::from(format!("diff-to-left-{index}")),
+                            IconName::ArrowLeft,
+                            format!("Copy to {left_name}"),
+                        )
+                        .text_color(p.fg_secondary)
+                        .on_click(move |_, _, cx| {
+                            to_left.update(cx, |this, cx| {
+                                this.copy_diff_row(index, DiffSide::Right, cx);
+                            });
+                        }),
+                    )
+            } else {
+                div().w(px(24.)).h(px(24.))
+            };
+
+            let gutter = h_flex()
+                .w(DIFF_GUTTER_W)
+                .flex_shrink_0()
+                .gap(px(4.))
+                .items_center()
+                .justify_center()
+                .child(right_slot)
+                .child(left_slot);
+
+            let right_col = div()
+                .flex_1()
+                .min_w(px(0.))
+                .pl(px(8.))
+                .font_family(mono.clone())
+                .text_size(px(13.))
+                .line_height(px(18.))
+                .truncate()
+                .text_color(right_color)
+                .child(right_text);
+
+            line = line
+                .child(key_col)
+                .child(left_col)
+                .child(gutter)
+                .child(right_col);
             body = body.child(line);
         }
-        panel.child(body)
+
+        pane.child(header).child(
+            div()
+                .id("diff-scroll-host")
+                .relative()
+                .flex_1()
+                .min_h(px(0.))
+                .mx(px(4.))
+                .my(px(4.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(if keys_focused {
+                    p.accent_ring
+                } else {
+                    p.bg_canvas.opacity(0.)
+                })
+                .overflow_hidden()
+                .child(body)
+                .child(Scrollbar::vertical(&self.diff_scroll).mode(ScrollbarMode::Hover)),
+        )
     }
 
-    fn toolbar(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
-        let save = cx.entity();
-        let eye = cx.entity();
-        let newer = cx.entity();
-        let example = cx.entity();
-        let settings = cx.entity();
-        let show_all = self.show_all;
-        h_flex()
-            .px_2()
-            .h(px(32.))
-            .gap(px(1.))
-            .items_center()
-            .child(
-                icon_button("tb-save", IconName::Save, "Save")
-                    .tooltip_with_action("Save", &Save, Some("Envy"))
-                    .on_click(move |_, _, cx| {
-                        save.update(cx, |this, cx| {
-                            this.save_open(cx);
-                            cx.notify();
-                        });
-                    }),
-            )
-            .child(
-                icon_button(
-                    "tb-eye",
-                    if show_all {
-                        IconName::EyeOff
-                    } else {
-                        IconName::Eye
-                    },
-                    if show_all {
-                        "Hide values"
-                    } else {
-                        "Show all values"
-                    },
-                )
-                .on_click(move |_, _, cx| {
-                    eye.update(cx, |this, cx| this.toggle_show_all(cx));
-                }),
-            )
-            .child(
-                icon_button("tb-new", IconName::Plus, "New key")
-                    .tooltip_with_action("New key", &NewKey, Some("Envy"))
-                    .on_click(move |_, window, cx| {
-                        newer.update(cx, |this, cx| this.begin_new_key(window, cx));
-                    }),
-            )
-            .child(
-                icon_button("tb-example", IconName::FilePlus, "New file from example").on_click(
-                    move |_, _, cx| {
-                        example.update(cx, |this, cx| this.new_from_example(cx));
-                    },
-                ),
-            )
-            .child(
-                icon_button("tb-settings", IconName::Settings, "Settings")
-                    .tooltip_with_action("Settings", &OpenSettings, Some("Envy"))
-                    .on_click(move |_, window, cx| {
-                        settings.update(cx, |this, cx| this.open_settings(window, cx));
-                    }),
-            )
-    }
-
-    fn overlay_view(&self, _window: &mut Window, cx: &mut Context<Self>) -> gpui_kit::Div {
+    fn overlay_view(
+        &self,
+        p: Palette,
+        mono: SharedString,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
         let entity = cx.entity();
-        let mut backdrop = div()
+        let panel = match &self.overlay {
+            Overlay::Settings => self.settings_panel(p, mono, cx),
+            Overlay::AddFolder => self.folder_panel(p, cx),
+            Overlay::Paste(plan) => self.paste_panel(plan, p, mono, cx),
+            Overlay::Shortcuts => self.shortcuts_panel(p, mono, cx),
+            Overlay::None => div(),
+        };
+        div()
             .absolute()
             .inset_0()
             .occlude()
-            .bg(cx.theme().background.opacity(0.72))
-            .on_mouse_down(MouseButton::Left, {
-                let entity = entity.clone();
-                move |_, window, cx| {
-                    entity.update(cx, |this, cx| this.close_overlay(window, cx));
-                }
-            });
-        let panel = match &self.overlay {
-            Overlay::Settings => self.settings_panel(cx),
-            Overlay::AddFolder => self.folder_panel(cx),
-            Overlay::Paste(plan) => self.paste_panel(plan, cx),
-            Overlay::Shortcuts => self.shortcuts_panel(cx),
-            Overlay::None => div(),
-        };
-        backdrop = backdrop.child(
-            div()
-                .absolute()
-                .top(px(64.))
-                .left(px(280.))
-                .w(px(520.))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(panel),
-        );
-        backdrop
+            .flex()
+            .items_center()
+            .justify_center()
+            .p(px(24.))
+            .bg(p.backdrop)
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                entity.update(cx, |this, cx| this.close_overlay(window, cx));
+            })
+            .child(
+                div()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(panel),
+            )
     }
 
-    fn settings_panel(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
+    fn settings_panel(
+        &self,
+        p: Palette,
+        mono: SharedString,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
         let entity = cx.entity();
         let theme = self.config.settings.theme;
         let clear = self.config.settings.clear_clipboard;
-        let mut folders = v_flex().gap_1();
-        for (index, folder) in self.config.folders.iter().enumerate() {
-            let entity = entity.clone();
+
+        let mut folders = v_flex()
+            .rounded(px(6.))
+            .border_1()
+            .border_color(p.border_hairline)
+            .bg(p.bg_chrome)
+            .overflow_hidden();
+
+        if self.config.folders.is_empty() {
             folders = folders.child(
-                h_flex()
-                    .gap_2()
+                div()
+                    .px(px(12.))
+                    .py(px(10.))
+                    .text_size(px(12.))
+                    .line_height(px(16.))
+                    .text_color(p.fg_tertiary)
+                    .child("No folders added."),
+            );
+        } else {
+            for (index, folder) in self.config.folders.iter().enumerate() {
+                let rm_entity = entity.clone();
+                let mut row = h_flex()
+                    .px(px(10.))
+                    .py(px(6.))
+                    .gap(px(8.))
                     .items_center()
                     .child(
                         div()
                             .flex_1()
-                            .text_xs()
-                            .font_family(cx.theme().mono_font_family.clone())
+                            .min_w(px(0.))
+                            .font_family(mono.clone())
+                            .text_size(px(11.5))
+                            .line_height(px(16.))
+                            .text_color(p.fg_primary)
+                            .truncate()
                             .child(folder.display().to_string()),
                     )
                     .child(
-                        icon_button(
+                        row_icon_button(
                             SharedString::from(format!("rm-folder-{index}")),
                             IconName::Trash,
                             "Remove folder",
                         )
+                        .text_color(p.fg_secondary)
                         .on_click(move |_, _, cx| {
-                            entity.update(cx, |this, cx| this.remove_folder(index, cx));
+                            rm_entity.update(cx, |this, cx| this.remove_folder(index, cx));
                         }),
-                    ),
-            );
+                    );
+                if index > 0 {
+                    row = row.border_t_1().border_color(p.border_hairline);
+                }
+                folders = folders.child(row);
+            }
         }
+
+        let header = overlay_header("Settings", p, entity.clone());
+
         v_flex()
-            .p_4()
-            .gap_3()
-            .bg(cx.theme().background)
+            .w(px(480.))
+            .bg(p.bg_surface)
             .border_1()
-            .border_color(cx.theme().border)
-            .rounded_md()
+            .border_color(p.border_control)
+            .rounded(px(10.))
+            .shadow_lg()
+            .overflow_hidden()
+            .child(header)
             .child(
-                div()
-                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .child("Settings"),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Theme"),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(theme_button(
-                        "theme-system",
-                        IconName::Monitor,
-                        "Follow the system",
-                        theme == ThemeSetting::System,
-                        ThemeSetting::System,
-                        cx,
-                    ))
-                    .child(theme_button(
-                        "theme-light",
-                        IconName::Sun,
-                        "Light",
-                        theme == ThemeSetting::Light,
-                        ThemeSetting::Light,
-                        cx,
-                    ))
-                    .child(theme_button(
-                        "theme-dark",
-                        IconName::Moon,
-                        "Dark",
-                        theme == ThemeSetting::Dark,
-                        ThemeSetting::Dark,
-                        cx,
-                    )),
-            )
-            .child(
-                icon_button(
-                    "clear-clip",
-                    if clear {
-                        IconName::ClipboardCheck
-                    } else {
-                        IconName::Clipboard
-                    },
-                    if clear {
-                        "Clipboard clears after 30s"
-                    } else {
-                        "Clipboard is kept"
-                    },
-                )
-                .selected(clear)
-                .on_click({
-                    let entity = entity.clone();
-                    move |_, _, cx| {
-                        entity.update(cx, |this, cx| this.toggle_clear_clipboard(cx));
-                    }
-                }),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Global hotkey"),
-            )
-            .child(Input::new(&self.hotkey_input).small())
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Folders"),
-            )
-            .child(folders)
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Secret values stay in your .env files."),
+                v_flex()
+                    .p(px(16.))
+                    .gap(px(16.))
+                    .child(
+                        v_flex().gap(px(6.)).child(setting_label("Theme", p)).child(
+                            h_flex()
+                                .gap(px(6.))
+                                .child(theme_option(
+                                    "theme-system",
+                                    IconName::Monitor,
+                                    "System",
+                                    theme == ThemeSetting::System,
+                                    ThemeSetting::System,
+                                    p,
+                                    cx,
+                                ))
+                                .child(theme_option(
+                                    "theme-light",
+                                    IconName::Sun,
+                                    "Light",
+                                    theme == ThemeSetting::Light,
+                                    ThemeSetting::Light,
+                                    p,
+                                    cx,
+                                ))
+                                .child(theme_option(
+                                    "theme-dark",
+                                    IconName::Moon,
+                                    "Dark",
+                                    theme == ThemeSetting::Dark,
+                                    ThemeSetting::Dark,
+                                    p,
+                                    cx,
+                                )),
+                        ),
+                    )
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(12.))
+                            .child(
+                                v_flex()
+                                    .gap(px(2.))
+                                    .child(setting_label("Clear clipboard", p))
+                                    .child(
+                                        div()
+                                            .text_size(px(11.5))
+                                            .line_height(px(15.))
+                                            .text_color(p.fg_tertiary)
+                                            .child("Wipe copied values after 30 seconds."),
+                                    ),
+                            )
+                            .child({
+                                let mut btn = Button::new("clear-clip")
+                                    .outline()
+                                    .small()
+                                    .icon(if clear {
+                                        IconName::ClipboardCheck
+                                    } else {
+                                        IconName::Clipboard
+                                    })
+                                    .label(if clear { "On (30s)" } else { "Off" })
+                                    .selected(clear)
+                                    .on_click({
+                                        let entity = entity.clone();
+                                        move |_, _, cx| {
+                                            entity.update(cx, |this, cx| {
+                                                this.toggle_clear_clipboard(cx);
+                                            });
+                                        }
+                                    });
+                                if clear {
+                                    btn = btn.text_color(p.accent);
+                                }
+                                btn
+                            }),
+                    )
+                    .child(
+                        v_flex()
+                            .gap(px(6.))
+                            .child(setting_label("Global hotkey", p))
+                            .child(Input::new(&self.hotkey_input).small()),
+                    )
+                    .child(
+                        v_flex()
+                            .gap(px(6.))
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(setting_label("Folders", p))
+                                    .child(
+                                        Button::new("settings-add-folder")
+                                            .ghost()
+                                            .xsmall()
+                                            .icon(IconName::FolderPlus)
+                                            .label("Add folder")
+                                            .on_click({
+                                                let entity = entity.clone();
+                                                move |_, window, cx| {
+                                                    entity.update(cx, |this, cx| {
+                                                        this.open_add_folder(window, cx);
+                                                    });
+                                                }
+                                            }),
+                                    ),
+                            )
+                            .child(folders),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .line_height(px(15.))
+                            .text_color(p.fg_tertiary)
+                            .child(
+                                "Values stay in your .env files and are never saved in settings.",
+                            ),
+                    ),
             )
     }
 
-    fn folder_panel(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
+    fn folder_panel(&self, p: Palette, cx: &mut Context<Self>) -> gpui_kit::Div {
         let entity = cx.entity();
+        let browse_entity = entity.clone();
         v_flex()
-            .p_4()
-            .gap_2()
-            .bg(cx.theme().background)
+            .w(px(460.))
+            .bg(p.bg_surface)
             .border_1()
-            .border_color(cx.theme().border)
-            .rounded_md()
+            .border_color(p.border_control)
+            .rounded(px(10.))
+            .shadow_lg()
+            .overflow_hidden()
+            .child(overlay_header("Add folder", p, entity))
             .child(
-                div()
-                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .child("Add folder"),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Path to a directory. Envy looks for .env files inside it."),
-            )
-            .child(Input::new(&self.folder_input))
-            .child(
-                icon_button("browse-folder", IconName::Folder, "Browse").on_click(
-                    move |_, window, cx| {
-                        entity.update(cx, |this, cx| this.open_add_folder(window, cx));
-                    },
-                ),
+                v_flex()
+                    .p(px(16.))
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .line_height(px(18.))
+                            .text_color(p.fg_secondary)
+                            .child("Enter a directory path to list its .env files."),
+                    )
+                    .child(Input::new(&self.folder_input).small())
+                    .child(
+                        h_flex().justify_end().gap(px(8.)).child(
+                            Button::new("browse-folder")
+                                .outline()
+                                .small()
+                                .icon(IconName::Folder)
+                                .label("Browse")
+                                .on_click(move |_, window, cx| {
+                                    browse_entity
+                                        .update(cx, |this, cx| this.open_add_folder(window, cx));
+                                }),
+                        ),
+                    ),
             )
     }
 
-    fn paste_panel(&self, plan: &PastePlan, cx: &App) -> gpui_kit::Div {
+    fn paste_panel(
+        &self,
+        plan: &PastePlan,
+        p: Palette,
+        mono: SharedString,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        let entity = cx.entity();
+        let apply_entity = entity.clone();
+        let cancel_entity = entity.clone();
+
         let mut list = v_flex()
-            .id("folder-list")
+            .id("paste-list")
             .max_h(px(280.))
             .overflow_y_scroll()
-            .gap_1();
+            .gap(px(2.));
         for change in &plan.changes {
-            let (mark, key, value) = match change {
-                PasteChange::Add { key, value } => ("add", key, value),
-                PasteChange::Overwrite { key, value, .. } => ("overwrite", key, value),
+            let (badge, badge_color, badge_bg, key, value) = match change {
+                PasteChange::Add { key, value } => ("add", p.accent, p.accent_subtle, key, value),
+                PasteChange::Overwrite { key, value, .. } => {
+                    ("update", p.warning, p.warning_bg, key, value)
+                }
             };
             list = list.child(
                 h_flex()
-                    .justify_between()
-                    .font_family(cx.theme().mono_font_family.clone())
-                    .text_sm()
-                    .child(format!("{mark}  {key}"))
+                    .h(px(30.))
+                    .flex_shrink_0()
+                    .px(px(8.))
+                    .gap(px(10.))
+                    .rounded(px(6.))
+                    .items_center()
+                    .bg(p.bg_chrome)
                     .child(
                         div()
-                            .text_color(cx.theme().muted_foreground)
+                            .w(px(52.))
+                            .flex_shrink_0()
+                            .px(px(6.))
+                            .py(px(1.))
+                            .rounded(px(4.))
+                            .bg(badge_bg)
+                            .text_center()
+                            .text_size(px(10.5))
+                            .line_height(px(14.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(badge_color)
+                            .child(badge),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .font_family(mono.clone())
+                            .text_size(px(12.5))
+                            .line_height(px(17.))
+                            .text_color(p.fg_primary)
+                            .truncate()
+                            .child(key.clone()),
+                    )
+                    .child(
+                        div()
+                            .max_w(px(160.))
+                            .font_family(mono.clone())
+                            .text_size(px(12.5))
+                            .line_height(px(17.))
+                            .text_color(p.fg_secondary)
+                            .truncate()
                             .child(display_value(value, self.visible(key))),
                     ),
             );
         }
+
         v_flex()
-            .p_4()
-            .gap_2()
-            .bg(cx.theme().background)
+            .w(px(520.))
+            .bg(p.bg_surface)
             .border_1()
-            .border_color(cx.theme().border)
-            .rounded_md()
+            .border_color(p.border_control)
+            .rounded(px(10.))
+            .shadow_lg()
+            .overflow_hidden()
+            .child(overlay_header(
+                format!("Paste {} keys", plan.changes.len()),
+                p,
+                entity,
+            ))
             .child(
-                div()
-                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .child(format!("Paste {} keys", plan.changes.len())),
+                v_flex()
+                    .p(px(16.))
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .line_height(px(18.))
+                            .text_color(p.fg_secondary)
+                            .child("Existing keys not in this paste stay unchanged."),
+                    )
+                    .child(list)
+                    .child(
+                        h_flex()
+                            .justify_end()
+                            .gap(px(8.))
+                            .child(
+                                Button::new("paste-cancel")
+                                    .ghost()
+                                    .small()
+                                    .label("Cancel")
+                                    .on_click(move |_, window, cx| {
+                                        cancel_entity
+                                            .update(cx, |this, cx| this.close_overlay(window, cx));
+                                    }),
+                            )
+                            .child(
+                                Button::new("paste-apply")
+                                    .primary()
+                                    .small()
+                                    .label("Apply paste")
+                                    .on_click(move |_, window, cx| {
+                                        apply_entity.update(cx, |this, cx| {
+                                            this.apply_overlay_paste(window, cx);
+                                        });
+                                    }),
+                            ),
+                    ),
             )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Enter confirms. Esc cancels. Lines you leave alone stay as they are."),
-            )
-            .child(list)
     }
 
     fn copy_missing(&mut self, from: DiffSide, cx: &mut Context<Self>) {
@@ -3936,58 +5238,65 @@ impl EnvyApp {
         self.pump_io(cx);
     }
 
-    fn shortcuts_panel(&self, cx: &App) -> gpui_kit::Div {
+    fn shortcuts_panel(
+        &self,
+        p: Palette,
+        mono: SharedString,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        let entity = cx.entity();
         let mid = SHORTCUTS.len().div_ceil(2);
-        let mut columns = h_flex().gap_4().items_start();
+        let mut columns = h_flex().gap(px(20.)).items_start();
         for range in [0..mid, mid..SHORTCUTS.len()] {
-            let mut column = v_flex().flex_1().gap(px(1.));
+            let mut column = v_flex().flex_1().gap(px(4.));
             for (keys, what) in &SHORTCUTS[range] {
                 column = column.child(
                     h_flex()
+                        .h(px(26.))
                         .justify_between()
-                        .gap_3()
-                        .py(px(2.))
-                        .px_2()
+                        .gap(px(12.))
+                        .px(px(6.))
                         .rounded(px(6.))
+                        .items_center()
                         .child(
                             div()
-                                .text_sm()
-                                .text_color(cx.theme().foreground)
+                                .text_size(px(12.5))
+                                .line_height(px(17.))
+                                .text_color(p.fg_primary)
                                 .child(*what),
                         )
-                        .child(
-                            div()
-                                .text_xs()
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .text_color(cx.theme().muted_foreground)
-                                .child(*keys),
-                        ),
+                        .child(kbd_chips(keys, p, mono.clone())),
                 );
             }
             columns = columns.child(column);
         }
         v_flex()
             .w(px(640.))
-            .p_3()
-            .gap_2()
-            .bg(cx.theme().background)
+            .bg(p.bg_surface)
             .border_1()
-            .border_color(cx.theme().border)
-            .rounded(px(12.))
-            .shadow_md()
+            .border_color(p.border_control)
+            .rounded(px(10.))
+            .shadow_lg()
+            .overflow_hidden()
+            .child(overlay_header("Keyboard shortcuts", p, entity))
+            .child(v_flex().p(px(16.)).gap(px(12.)).child(columns))
             .child(
-                div()
-                    .px_2()
-                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .child("Shortcuts"),
-            )
-            .child(columns)
-            .child(
-                div()
-                    .px_2()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Esc closes this."),
+                h_flex()
+                    .px(px(16.))
+                    .py(px(10.))
+                    .bg(p.bg_chrome)
+                    .border_t_1()
+                    .border_color(p.border_hairline)
+                    .items_center()
+                    .gap(px(6.))
+                    .child(kbd_chip("Esc", p, mono))
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .line_height(px(15.))
+                            .text_color(p.fg_tertiary)
+                            .child("Close"),
+                    ),
             )
     }
 }
@@ -4192,20 +5501,200 @@ impl EnvyApp {
     }
 }
 
-fn theme_button(
+fn apply_theme_setting(setting: ThemeSetting, window: &mut Window, cx: &mut App) {
+    match setting {
+        ThemeSetting::System => Theme::sync_system_appearance(Some(window), cx),
+        ThemeSetting::Light => Theme::change(ThemeMode::Light, Some(window), cx),
+        ThemeSetting::Dark => Theme::change(ThemeMode::Dark, Some(window), cx),
+    }
+    theme::apply_palette(cx);
+}
+
+fn theme_option(
     id: &'static str,
     icon: IconName,
-    tip: &'static str,
+    label: &'static str,
     selected: bool,
-    theme: ThemeSetting,
+    setting: ThemeSetting,
+    p: Palette,
     cx: &mut Context<EnvyApp>,
-) -> gpui_kit::component::button::Button {
+) -> Button {
     let entity = cx.entity();
-    icon_button(id, icon, tip)
+    let mut btn = Button::new(id)
+        .outline()
+        .small()
+        .icon(icon)
+        .label(label)
         .selected(selected)
         .on_click(move |_, window, cx| {
-            entity.update(cx, |this, cx| this.set_theme(theme, window, cx));
-        })
+            entity.update(cx, |this, cx| this.set_theme(setting, window, cx));
+        });
+    if selected {
+        btn = btn.text_color(p.accent);
+    }
+    btn
+}
+
+fn overlay_header(
+    title: impl Into<SharedString>,
+    p: Palette,
+    entity: Entity<EnvyApp>,
+) -> gpui_kit::Div {
+    h_flex()
+        .h(px(44.))
+        .px(px(16.))
+        .items_center()
+        .justify_between()
+        .bg(p.bg_chrome)
+        .border_b_1()
+        .border_color(p.border_hairline)
+        .child(
+            div()
+                .text_size(px(14.))
+                .line_height(px(20.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(p.fg_primary)
+                .child(title.into()),
+        )
+        .child(
+            row_icon_button("overlay-close", IconName::X, "Close · Esc")
+                .text_color(p.fg_secondary)
+                .on_click(move |_, window, cx| {
+                    entity.update(cx, |this, cx| this.close_overlay(window, cx));
+                }),
+        )
+}
+
+fn setting_label(text: &'static str, p: Palette) -> gpui_kit::Div {
+    div()
+        .text_size(px(12.))
+        .line_height(px(16.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(p.fg_primary)
+        .child(text)
+}
+
+fn side_badge(tag: &'static str, p: Palette) -> gpui_kit::Div {
+    div()
+        .px(px(4.))
+        .py(px(1.))
+        .rounded(px(4.))
+        .bg(p.accent_subtle)
+        .text_size(px(10.))
+        .line_height(px(12.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(p.accent)
+        .child(tag)
+}
+
+fn summary_pill(
+    text: String,
+    fg: gpui_kit::Hsla,
+    bg: gpui_kit::Hsla,
+    border: gpui_kit::Hsla,
+) -> gpui_kit::Div {
+    div()
+        .h(px(22.))
+        .px(px(8.))
+        .flex()
+        .items_center()
+        .rounded(px(999.))
+        .bg(bg)
+        .border_1()
+        .border_color(border)
+        .text_size(px(11.))
+        .line_height(px(14.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(fg)
+        .child(text)
+}
+
+fn kbd_chip(keys: &str, p: Palette, mono: SharedString) -> gpui_kit::Div {
+    div()
+        .px(px(5.))
+        .py(px(1.))
+        .rounded(px(4.))
+        .bg(p.bg_kbd)
+        .border_1()
+        .border_color(p.border_control)
+        .font_family(mono)
+        .text_size(px(10.5))
+        .line_height(px(14.))
+        .text_color(p.fg_secondary)
+        .whitespace_nowrap()
+        .child(keys.to_string())
+}
+
+fn kbd_chips(keys: &str, p: Palette, mono: SharedString) -> gpui_kit::Div {
+    let mut row = h_flex().items_center().gap(px(4.)).flex_shrink_0();
+    for part in keys.split("  ") {
+        row = row.child(kbd_chip(part, p, mono.clone()));
+    }
+    row
+}
+
+fn footer_hint(keys: &str, label: &str, p: Palette, mono: SharedString) -> gpui_kit::Div {
+    h_flex()
+        .items_center()
+        .gap(px(5.))
+        .child(kbd_chip(keys, p, mono))
+        .child(
+            div()
+                .text_size(px(11.))
+                .line_height(px(14.))
+                .text_color(p.fg_tertiary)
+                .whitespace_nowrap()
+                .child(label.to_string()),
+        )
+}
+
+fn v_divider(p: Palette) -> gpui_kit::Div {
+    div()
+        .w(px(1.))
+        .h(px(16.))
+        .mx(px(4.))
+        .bg(p.border_hairline)
+        .flex_shrink_0()
+}
+
+fn toolbar_icon_button(
+    id: impl Into<SharedString>,
+    icon: IconName,
+    tip: impl Into<SharedString>,
+    active: bool,
+    disabled: bool,
+    p: Palette,
+) -> Button {
+    let mut btn = Button::new(id.into())
+        .ghost()
+        .small()
+        .compact()
+        .icon(icon)
+        .tooltip(tip)
+        .disabled(disabled)
+        .rounded(px(6.));
+    if active {
+        btn = btn.bg(p.accent_subtle).text_color(p.accent);
+    } else if disabled {
+        btn = btn.text_color(p.fg_tertiary.opacity(0.45));
+    } else {
+        btn = btn.text_color(p.fg_secondary);
+    }
+    btn
+}
+
+fn row_icon_button(
+    id: impl Into<SharedString>,
+    icon: IconName,
+    tip: impl Into<SharedString>,
+) -> Button {
+    Button::new(id.into())
+        .ghost()
+        .xsmall()
+        .compact()
+        .icon(icon)
+        .tooltip(tip)
+        .rounded(px(4.))
 }
 
 fn app_mark() -> Arc<gpui_kit::Image> {
@@ -4225,19 +5714,6 @@ fn files_found_label(count: usize) -> String {
     } else {
         format!("{count} files")
     }
-}
-
-fn icon_button(
-    id: impl Into<SharedString>,
-    icon: IconName,
-    tip: impl Into<SharedString>,
-) -> Button {
-    Button::new(id.into())
-        .ghost()
-        .xsmall()
-        .compact()
-        .icon(icon)
-        .tooltip(tip)
 }
 
 fn hover_tip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
