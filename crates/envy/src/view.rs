@@ -39,8 +39,8 @@ use crate::hotkey_os;
 use crate::instance::Instance;
 use crate::theme::{
     self, Palette, COL_HEADER_H, DIFF_GUTTER_W, DIFF_HEADER_H, DIFF_KEY_COL_W, DIFF_ROW_H,
-    FOOTER_H, KEY_ACTIONS_W, KEY_COL_W, KEY_ROW_H, MASK_MAX_DOTS, SIDEBAR_HEADER_H, SIDEBAR_ROW_H,
-    SIDEBAR_W, TAB_BAR_H, TOOLBAR_H,
+    FOOTER_H, KEY_ACTIONS_W, KEY_COL_W, KEY_ROW_H, MASK_MAX_DOTS, SIDEBAR_HEADER_H,
+    SIDEBAR_ROW_BRANCH_H, SIDEBAR_ROW_COMPACT_H, SIDEBAR_W, TAB_BAR_H, TITLE_BAR_H, TOOLBAR_H,
 };
 
 const CLEAR_AFTER: Duration = Duration::from_secs(30);
@@ -2800,30 +2800,77 @@ impl Render for EnvyApp {
             root = root.child(self.overlay_view(p, mono, window, cx));
         }
 
+        let active_project = self.project_ix.and_then(|ix| self.projects.get(ix));
+        let mut title_content = h_flex().flex_1().min_w(px(0.)).items_center().child(
+            h_flex()
+                .w(SIDEBAR_W - px(12.))
+                .flex_shrink_0()
+                .gap(px(8.))
+                .items_center()
+                .child(
+                    gpui_kit::img(app_mark())
+                        .w(px(16.))
+                        .h(px(16.))
+                        .rounded(px(4.)),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.5))
+                        .line_height(px(16.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(p.fg_primary)
+                        .child("Envy"),
+                ),
+        );
+        if let Some(project) = active_project {
+            let mut crumb = h_flex()
+                .flex_1()
+                .min_w(px(0.))
+                .pl(px(12.))
+                .gap(px(8.))
+                .items_center()
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .line_height(px(16.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(p.fg_secondary)
+                        .truncate()
+                        .child(project.name.clone()),
+                );
+            if let Some(branch) = display_branch(&project.branch) {
+                crumb = crumb.child(
+                    h_flex()
+                        .gap(px(4.))
+                        .items_center()
+                        .flex_shrink_0()
+                        .child(
+                            Icon::new(IconName::GitBranch)
+                                .size(px(12.))
+                                .text_color(p.fg_tertiary),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.5))
+                                .line_height(px(16.))
+                                .text_color(p.fg_tertiary)
+                                .child(branch.to_string()),
+                        ),
+                );
+            }
+            title_content = title_content.child(crumb);
+        }
+
         v_flex()
             .size_full()
             .bg(p.bg_canvas)
             .text_color(p.fg_primary)
             .child(
-                TitleBar::new().child(
-                    h_flex()
-                        .gap(px(8.))
-                        .items_center()
-                        .child(
-                            gpui_kit::img(app_mark())
-                                .w(px(16.))
-                                .h(px(16.))
-                                .rounded(px(4.)),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(13.))
-                                .line_height(px(18.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(p.fg_primary)
-                                .child("Envy"),
-                        ),
-                ),
+                TitleBar::new()
+                    .h(TITLE_BAR_H)
+                    .bg(p.bg_chrome)
+                    .border_color(p.border_hairline)
+                    .child(title_content),
             )
             .child(root.flex_1().min_h(px(0.)).w_full())
     }
@@ -3008,15 +3055,27 @@ impl EnvyApp {
                 None
             };
 
+            let row_h = if branch.is_some() {
+                SIDEBAR_ROW_BRANCH_H
+            } else {
+                SIDEBAR_ROW_COMPACT_H
+            };
+
             let mut row = h_flex()
                 .id(SharedString::from(format!("project-{visible_ix}")))
                 .group(group.clone())
-                .mx(px(4.))
+                .mx(px(8.))
                 .px(px(8.))
-                .h(SIDEBAR_ROW_H)
+                .h(row_h)
                 .flex_shrink_0()
                 .gap(px(8.))
                 .rounded(px(6.))
+                .border_1()
+                .border_color(if selected && list_focused {
+                    p.accent_ring
+                } else {
+                    p.bg_chrome.opacity(0.)
+                })
                 .items_center()
                 .overflow_hidden()
                 .cursor_pointer()
@@ -3062,10 +3121,10 @@ impl EnvyApp {
                             FontWeight::NORMAL
                         })
                         .truncate()
-                        .text_color(if selected && list_focused {
-                            p.accent
-                        } else {
+                        .text_color(if selected {
                             p.fg_primary
+                        } else {
+                            p.fg_primary.opacity(0.92)
                         })
                         .child(project.name.clone()),
                 );
@@ -3078,7 +3137,7 @@ impl EnvyApp {
                         .min_w(px(0.))
                         .child(
                             Icon::new(IconName::GitBranch)
-                                .size(px(11.))
+                                .size(px(12.))
                                 .text_color(p.fg_tertiary),
                         )
                         .child(
@@ -3152,15 +3211,7 @@ impl EnvyApp {
                     .relative()
                     .flex_1()
                     .min_h(px(0.))
-                    .mx(px(4.))
-                    .mb(px(4.))
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(if list_focused {
-                        p.accent_ring
-                    } else {
-                        p.bg_chrome.opacity(0.)
-                    })
+                    .w_full()
                     .overflow_hidden()
                     .child(project_list)
                     .child(Scrollbar::vertical(&self.project_scroll).mode(ScrollbarMode::Hover)),
@@ -3226,7 +3277,7 @@ impl EnvyApp {
             let mut tab = h_flex()
                 .id(SharedString::from(format!("file-{index}")))
                 .relative()
-                .h(px(33.))
+                .h(px(31.))
                 .px(px(12.))
                 .gap(px(6.))
                 .items_center()
@@ -3393,41 +3444,35 @@ impl EnvyApp {
                     }
                 }
                 if different == 0 && only_left == 0 && only_right == 0 {
-                    left = left.child(
-                        div()
-                            .px(px(8.))
-                            .py(px(2.))
-                            .rounded(px(999.))
-                            .bg(p.accent_subtle)
-                            .text_size(px(11.5))
-                            .line_height(px(16.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(p.accent)
-                            .child("Files match"),
-                    );
+                    left = left.child(neutral_summary_chip(
+                        IconName::Check,
+                        p.accent,
+                        "Files match".into(),
+                        p,
+                    ));
                 } else {
                     if different > 0 {
-                        left = left.child(summary_pill(
-                            format!("{different} differ"),
+                        left = left.child(neutral_summary_chip(
+                            IconName::EqualNot,
                             p.warning,
-                            p.warning_bg,
-                            p.warning_border,
+                            format!("{different} differ"),
+                            p,
                         ));
                     }
                     if only_left > 0 {
-                        left = left.child(summary_pill(
-                            format!("{only_left} left only"),
+                        left = left.child(neutral_summary_chip(
+                            IconName::Plus,
                             p.accent,
-                            p.accent_subtle,
-                            p.accent_ring,
+                            format!("{only_left} left only"),
+                            p,
                         ));
                     }
                     if only_right > 0 {
-                        left = left.child(summary_pill(
-                            format!("{only_right} right only"),
+                        left = left.child(neutral_summary_chip(
+                            IconName::Minus,
                             p.danger,
-                            p.danger_bg,
-                            p.danger_border,
+                            format!("{only_right} right only"),
+                            p,
                         ));
                     }
                 }
@@ -3817,11 +3862,17 @@ impl EnvyApp {
             let mut row = h_flex()
                 .id(SharedString::from(format!("key-{node}")))
                 .group(key_group.clone())
-                .mx(px(4.))
+                .mx(px(8.))
                 .px(px(7.))
                 .h(if editing_this { px(36.) } else { KEY_ROW_H })
                 .flex_shrink_0()
                 .rounded(px(6.))
+                .border_1()
+                .border_color(if selected && keys_focused && !editing_this {
+                    p.accent_ring
+                } else {
+                    p.bg_canvas.opacity(0.)
+                })
                 .items_center()
                 .overflow_hidden()
                 .cursor_pointer()
@@ -3844,11 +3895,7 @@ impl EnvyApp {
                 row = row.hover(move |style| style.bg(p.bg_hover));
             }
 
-            let key_color = if query_active || (selected && keys_focused) {
-                p.accent
-            } else {
-                p.fg_primary
-            };
+            let key_color = if query_active { p.accent } else { p.fg_primary };
             let full_key_tip = if *exported {
                 format!("export {key}")
             } else {
@@ -4006,9 +4053,9 @@ impl EnvyApp {
         if editing_new {
             if let Some(editor) = &self.editor {
                 let mut row = h_flex()
-                    .mx(px(4.))
+                    .mx(px(8.))
                     .mt(px(4.))
-                    .px(px(7.))
+                    .px(px(8.))
                     .h(px(36.))
                     .flex_shrink_0()
                     .rounded(px(6.))
@@ -4047,6 +4094,33 @@ impl EnvyApp {
                     );
                 table = table.child(row);
             }
+        } else if self.open.is_some() && (!rows_src.is_empty() || !query_active) {
+            let add_entity = entity.clone();
+            table = table.child(
+                h_flex()
+                    .id("inline-add-key")
+                    .mx(px(8.))
+                    .mt(px(4.))
+                    .px(px(8.))
+                    .h(KEY_ROW_H)
+                    .flex_shrink_0()
+                    .gap(px(6.))
+                    .rounded(px(6.))
+                    .items_center()
+                    .text_color(p.fg_tertiary)
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(p.bg_hover).text_color(p.fg_secondary))
+                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                        add_entity.update(cx, |this, cx| this.begin_new_key(window, cx));
+                    })
+                    .child(Icon::new(IconName::Plus).size(px(13.)))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .line_height(px(16.))
+                            .child("Add key"),
+                    ),
+            );
         }
 
         let mut pane = v_flex().flex_1().min_h(px(0.)).w_full().overflow_hidden();
@@ -4115,27 +4189,45 @@ impl EnvyApp {
                 .relative()
                 .flex_1()
                 .min_h(px(0.))
-                .mx(px(4.))
-                .my(px(4.))
-                .rounded(px(8.))
-                .border_1()
-                .border_color(if keys_focused {
-                    p.accent_ring
-                } else {
-                    p.bg_canvas.opacity(0.)
-                })
+                .w_full()
                 .overflow_hidden()
                 .child(table)
                 .child(Scrollbar::vertical(&self.key_scroll).mode(ScrollbarMode::Hover)),
         )
     }
 
+    fn short_project_path(&self) -> (String, String) {
+        let Some(open) = self.open.as_ref() else {
+            return (String::new(), String::new());
+        };
+        let full = open.path.display().to_string();
+        let short = if let Some(project) = self.project_ix.and_then(|ix| self.projects.get(ix)) {
+            if let Ok(rel) = open.path.strip_prefix(&project.root) {
+                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                if rel_str.is_empty() {
+                    project.name.clone()
+                } else {
+                    format!("{}/{rel_str}", project.name)
+                }
+            } else {
+                open.path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|f| format!("{}/{f}", project.name))
+                    .unwrap_or_else(|| full.clone())
+            }
+        } else {
+            open.path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| full.clone())
+        };
+        (short, full)
+    }
+
     fn render_footer(&self, p: Palette, mono: SharedString) -> gpui_kit::Div {
-        let path_label = self
-            .open
-            .as_ref()
-            .map(|open| open.path.display().to_string())
-            .unwrap_or_default();
+        let (path_short, path_full) = self.short_project_path();
         let status = self.status.clone();
         let dirty = self.open.as_ref().is_some_and(|open| open.is_dirty());
 
@@ -4162,7 +4254,7 @@ impl EnvyApp {
                     .truncate()
                     .child(status),
             );
-        } else if !path_label.is_empty() {
+        } else if !path_short.is_empty() {
             left = left.child(
                 div()
                     .id("footer-path")
@@ -4173,8 +4265,8 @@ impl EnvyApp {
                     .line_height(px(14.))
                     .text_color(p.fg_tertiary)
                     .truncate()
-                    .tooltip(hover_tip(path_label.clone()))
-                    .child(path_label),
+                    .tooltip(hover_tip(path_full))
+                    .child(path_short),
             );
         }
 
@@ -4440,7 +4532,19 @@ impl EnvyApp {
                         )
                     }),
             )
-            .child(div().w(DIFF_GUTTER_W).flex_shrink_0())
+            .child(
+                div()
+                    .w(DIFF_GUTTER_W)
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        Icon::new(IconName::ArrowLeftRight)
+                            .size(px(12.))
+                            .text_color(p.fg_tertiary.opacity(0.65)),
+                    ),
+            )
             .child(
                 h_flex()
                     .flex_1()
@@ -4559,11 +4663,17 @@ impl EnvyApp {
             let mut line = h_flex()
                 .id(SharedString::from(format!("diff-row-{index}")))
                 .group(diff_group.clone())
-                .mx(px(4.))
+                .mx(px(8.))
                 .px(px(7.))
                 .h(DIFF_ROW_H)
                 .flex_shrink_0()
                 .rounded(px(6.))
+                .border_1()
+                .border_color(if selected {
+                    p.accent_ring
+                } else {
+                    p.bg_canvas.opacity(0.)
+                })
                 .items_center()
                 .overflow_hidden()
                 .cursor_pointer()
@@ -4576,13 +4686,12 @@ impl EnvyApp {
                     });
                 });
 
-            if let Some(bg) = tint {
+            if selected && tint.is_none() {
+                line = line.bg(p.bg_selected_accent);
+            } else if let Some(bg) = tint {
                 line = line.bg(bg);
             } else {
-                line = line.hover(move |style| style.bg(p.bg_hover.opacity(0.7)));
-            }
-            if selected {
-                line = line.border_1().border_color(p.accent_ring);
+                line = line.hover(move |style| style.bg(p.bg_hover));
             }
 
             let key_col = h_flex()
@@ -4631,62 +4740,43 @@ impl EnvyApp {
                 .text_color(left_color)
                 .child(left_text);
 
-            let right_slot = if can_copy_right {
-                div()
-                    .w(px(24.))
-                    .h(px(24.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        row_icon_button(
-                            SharedString::from(format!("diff-to-right-{index}")),
-                            IconName::ArrowRight,
-                            format!("Copy to {right_name}"),
-                        )
-                        .text_color(p.fg_secondary)
-                        .on_click(move |_, _, cx| {
-                            to_right.update(cx, |this, cx| {
-                                this.copy_diff_row(index, DiffSide::Left, cx);
-                            });
-                        }),
-                    )
-            } else {
-                div().w(px(24.)).h(px(24.))
-            };
-
-            let left_slot = if can_copy_left {
-                div()
-                    .w(px(24.))
-                    .h(px(24.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        row_icon_button(
-                            SharedString::from(format!("diff-to-left-{index}")),
-                            IconName::ArrowLeft,
-                            format!("Copy to {left_name}"),
-                        )
-                        .text_color(p.fg_secondary)
-                        .on_click(move |_, _, cx| {
-                            to_left.update(cx, |this, cx| {
-                                this.copy_diff_row(index, DiffSide::Right, cx);
-                            });
-                        }),
-                    )
-            } else {
-                div().w(px(24.)).h(px(24.))
-            };
-
-            let gutter = h_flex()
+            let mut gutter = h_flex()
                 .w(DIFF_GUTTER_W)
                 .flex_shrink_0()
-                .gap(px(4.))
+                .gap(px(2.))
                 .items_center()
-                .justify_center()
-                .child(right_slot)
-                .child(left_slot);
+                .justify_center();
+
+            if can_copy_right {
+                gutter = gutter.child(
+                    row_icon_button(
+                        SharedString::from(format!("diff-to-right-{index}")),
+                        IconName::ArrowRight,
+                        format!("Copy to {right_name}"),
+                    )
+                    .text_color(p.fg_secondary)
+                    .on_click(move |_, _, cx| {
+                        to_right.update(cx, |this, cx| {
+                            this.copy_diff_row(index, DiffSide::Left, cx);
+                        });
+                    }),
+                );
+            }
+            if can_copy_left {
+                gutter = gutter.child(
+                    row_icon_button(
+                        SharedString::from(format!("diff-to-left-{index}")),
+                        IconName::ArrowLeft,
+                        format!("Copy to {left_name}"),
+                    )
+                    .text_color(p.fg_secondary)
+                    .on_click(move |_, _, cx| {
+                        to_left.update(cx, |this, cx| {
+                            this.copy_diff_row(index, DiffSide::Right, cx);
+                        });
+                    }),
+                );
+            }
 
             let right_col = div()
                 .flex_1()
@@ -4713,15 +4803,7 @@ impl EnvyApp {
                 .relative()
                 .flex_1()
                 .min_h(px(0.))
-                .mx(px(4.))
-                .my(px(4.))
-                .rounded(px(8.))
-                .border_1()
-                .border_color(if keys_focused {
-                    p.accent_ring
-                } else {
-                    p.bg_canvas.opacity(0.)
-                })
+                .w_full()
                 .overflow_hidden()
                 .child(body)
                 .child(Scrollbar::vertical(&self.diff_scroll).mode(ScrollbarMode::Hover)),
@@ -5587,25 +5669,26 @@ fn side_badge(tag: &'static str, p: Palette) -> gpui_kit::Div {
         .child(tag)
 }
 
-fn summary_pill(
+fn neutral_summary_chip(
+    icon: IconName,
+    icon_color: gpui_kit::Hsla,
     text: String,
-    fg: gpui_kit::Hsla,
-    bg: gpui_kit::Hsla,
-    border: gpui_kit::Hsla,
+    p: Palette,
 ) -> gpui_kit::Div {
-    div()
+    h_flex()
         .h(px(22.))
         .px(px(8.))
-        .flex()
+        .gap(px(5.))
         .items_center()
         .rounded(px(999.))
-        .bg(bg)
+        .bg(p.bg_kbd)
         .border_1()
-        .border_color(border)
+        .border_color(p.border_hairline)
         .text_size(px(11.))
         .line_height(px(14.))
         .font_weight(FontWeight::MEDIUM)
-        .text_color(fg)
+        .text_color(p.fg_secondary)
+        .child(Icon::new(icon).size(px(11.)).text_color(icon_color))
         .child(text)
 }
 
@@ -5674,9 +5757,13 @@ fn toolbar_icon_button(
         .disabled(disabled)
         .rounded(px(6.));
     if active {
-        btn = btn.bg(p.accent_subtle).text_color(p.accent);
+        btn = btn
+            .bg(p.accent_subtle)
+            .border_1()
+            .border_color(p.accent_ring)
+            .text_color(p.accent);
     } else if disabled {
-        btn = btn.text_color(p.fg_tertiary.opacity(0.45));
+        btn = btn.text_color(p.fg_tertiary.opacity(0.38)).cursor_default();
     } else {
         btn = btn.text_color(p.fg_secondary);
     }
