@@ -1,11 +1,11 @@
 //! The Envy window.
 //!
-//! Three zones: projects, the open file, and a diff that stays closed until
-//! asked for. Secret values are rendered from memory and are never written to
-//! the status line.
+//! Projects on the left, the open file in the center, and a two-file comparison
+//! that stays closed until asked for. Secret values are rendered from memory
+//! and are never written to the status line.
 
 use std::collections::{HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -14,23 +14,25 @@ use envy_core::discover::{
 };
 use envy_core::document::Node;
 use envy_core::paste::{PasteChange, PastePlan};
-use envy_core::search::{SearchCommand, SearchHit, SearchKind};
 use envy_core::{
     attach_git_identity, cache_from_projects, diff, fill_key_index, from_example, is_env_key,
     load_index_cache, plan_paste, projects_from_cache, save_index_cache, save_text, scan_paths,
-    search, upsert_file, Config, Deeplink, EnvDocument, EnvFile, FoundEnv, OpenFile, Project,
+    sidebar_rank, upsert_file, Config, Deeplink, EnvDocument, EnvFile, FoundEnv, OpenFile, Project,
     ScanError, ThemeSetting,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Selectable, Sizable, Theme, ThemeMode};
+use gpui_kit::component::{
+    h_flex, v_flex, ActiveTheme, Selectable, Sizable, Theme, ThemeMode, TitleBar,
+};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     div, px, rgb, size, AnyView, AnyWindowHandle, App, Bounds, ClipboardItem, Context, Entity,
-    FocusHandle, Focusable, KeyDownEvent, MouseButton, PathPromptOptions, SharedString,
-    Subscription, Task, TitlebarOptions, Window, WindowBounds, WindowOptions,
+    FocusHandle, Focusable, KeyDownEvent, MouseButton, PathPromptOptions, ScrollHandle,
+    SharedString, Subscription, Task, Window, WindowBounds, WindowOptions,
 };
 
 use crate::actions::*;
@@ -43,6 +45,12 @@ const CLEAR_AFTER: Duration = Duration::from_secs(30);
 enum Zone {
     Projects,
     Keys,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DiffSide {
+    Left,
+    Right,
 }
 
 enum EditKind {
@@ -60,7 +68,6 @@ struct Editor {
 
 enum Overlay {
     None,
-    Palette,
     Settings,
     AddFolder,
     Paste(PastePlan),
@@ -84,15 +91,20 @@ pub struct EnvyApp {
     editor: Option<Editor>,
     edit_subs: Vec<Subscription>,
     overlay: Overlay,
-    palette_input: Entity<InputState>,
     folder_input: Entity<InputState>,
     hotkey_input: Entity<InputState>,
     input_subs: Vec<Subscription>,
-    palette_hits: Vec<SearchHit>,
-    palette_ix: usize,
+    project_scroll: ScrollHandle,
+    project_filter: Entity<InputState>,
+    filter_query: String,
+    key_filter: Entity<InputState>,
+    key_query: String,
     diff_open: bool,
-    diff_ix: Option<usize>,
-    diff_doc: Option<EnvDocument>,
+    diff_left: Option<usize>,
+    diff_right: Option<usize>,
+    diff_left_doc: Option<EnvDocument>,
+    diff_right_doc: Option<EnvDocument>,
+    diff_menu: Option<DiffSide>,
     status: String,
     clear_token: u64,
     clear_task: Option<Task<()>>,
@@ -153,10 +165,10 @@ impl EnvyApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let palette_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Projects, files, and keys"));
         let folder_input = cx.new(|cx| InputState::new(window, cx).placeholder("Folder path"));
         let hotkey_input = cx.new(|cx| InputState::new(window, cx).placeholder("ctrl+alt+e"));
+        let project_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Find a project"));
+        let key_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Find a key"));
         let focus = cx.focus_handle();
         let now = Instant::now();
         let mut app = Self {
@@ -176,15 +188,20 @@ impl EnvyApp {
             editor: None,
             edit_subs: Vec::new(),
             overlay: Overlay::None,
-            palette_input,
             folder_input,
             hotkey_input,
             input_subs: Vec::new(),
-            palette_hits: Vec::new(),
-            palette_ix: 0,
+            project_scroll: ScrollHandle::new(),
+            project_filter,
+            filter_query: String::new(),
+            key_filter,
+            key_query: String::new(),
             diff_open: false,
-            diff_ix: None,
-            diff_doc: None,
+            diff_left: None,
+            diff_right: None,
+            diff_left_doc: None,
+            diff_right_doc: None,
+            diff_menu: None,
             status: "Starting…".into(),
             clear_token: 0,
             clear_task: None,
@@ -292,11 +309,8 @@ impl EnvyApp {
         let bounds = Bounds::centered(None, size(px(1100.), px(720.)), bounds_cx);
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(TitlebarOptions {
-                title: Some("Envy".into()),
-                appears_transparent: false,
-                traffic_light_position: None,
-            }),
+            titlebar: Some(TitleBar::title_bar_options()),
+            app_owns_titlebar_drag: true,
             app_id: Some("envy".into()),
             window_min_size: Some(size(px(760.), px(480.))),
             focus: true,
@@ -320,18 +334,6 @@ impl EnvyApp {
 
     fn wire_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.input_subs.push(cx.subscribe_in(
-            &self.palette_input,
-            window,
-            |this, _, event, _window, cx| {
-                if let InputEvent::Change = event {
-                    if matches!(this.overlay, Overlay::Palette) {
-                        this.refresh_palette_with(cx);
-                        cx.notify();
-                    }
-                }
-            },
-        ));
-        self.input_subs.push(cx.subscribe_in(
             &self.folder_input,
             window,
             |this, state, event, _window, cx| {
@@ -339,6 +341,41 @@ impl EnvyApp {
                     let path = state.read(cx).value().to_string();
                     this.commit_folder(path, cx);
                 }
+            },
+        ));
+        self.input_subs.push(cx.subscribe_in(
+            &self.project_filter,
+            window,
+            |this, state, event, window, cx| match event {
+                InputEvent::Change => {
+                    this.filter_query = state.read(cx).value().to_string();
+                    this.scroll_project_into_view();
+                    cx.notify();
+                }
+                InputEvent::PressEnter { .. } => {
+                    this.open_filtered_project(window, cx);
+                }
+                InputEvent::Focus | InputEvent::Blur => {}
+            },
+        ));
+        self.input_subs.push(cx.subscribe_in(
+            &self.key_filter,
+            window,
+            |this, state, event, window, cx| match event {
+                InputEvent::Change => {
+                    this.key_query = state.read(cx).value().to_string();
+                    let len = this.visible_entry_nodes().len();
+                    if this.cursor >= len {
+                        this.cursor = 0;
+                    }
+                    cx.notify();
+                }
+                InputEvent::PressEnter { .. } => {
+                    this.zone = Zone::Keys;
+                    this.focus_self(window, cx);
+                    cx.notify();
+                }
+                InputEvent::Focus | InputEvent::Blur => {}
             },
         ));
         self.input_subs.push(cx.subscribe_in(
@@ -600,32 +637,6 @@ impl EnvyApp {
         }
     }
 
-    fn commands(&self) -> Vec<SearchCommand> {
-        [
-            ("add-folder", "Add folder", "Ctrl+O"),
-            ("new-key", "New key", "N"),
-            (
-                "from-example",
-                "New .env.local from example",
-                "Ctrl+Shift+N",
-            ),
-            ("diff", "Toggle diff", "D"),
-            ("show-all", "Show all values", "A"),
-            ("hide-all", "Hide all values", ""),
-            ("settings", "Settings", "Ctrl+,"),
-            ("refresh", "Rescan folders", "Ctrl+R"),
-            ("copy", "Copy value", "C"),
-            ("quit", "Quit", ""),
-        ]
-        .into_iter()
-        .map(|(id, label, detail)| SearchCommand {
-            id: id.into(),
-            label: label.into(),
-            detail: detail.into(),
-        })
-        .collect()
-    }
-
     fn current_path(&self) -> Option<PathBuf> {
         let project = self.projects.get(self.project_ix?)?;
         Some(project.files.get(self.file_ix?)?.path.clone())
@@ -638,8 +649,26 @@ impl EnvyApp {
             .unwrap_or_default()
     }
 
+    fn visible_entry_nodes(&self) -> Vec<usize> {
+        let nodes = self.entry_nodes();
+        let query = self.key_query.trim().to_ascii_lowercase();
+        if query.is_empty() {
+            return nodes;
+        }
+        let Some(open) = &self.open else {
+            return nodes;
+        };
+        nodes
+            .into_iter()
+            .filter(|node| match open.document.nodes.get(*node) {
+                Some(Node::Entry(entry)) => fuzzy_hit(&entry.key, &query),
+                _ => false,
+            })
+            .collect()
+    }
+
     fn selected_node(&self) -> Option<usize> {
-        self.entry_nodes().get(self.cursor).copied()
+        self.visible_entry_nodes().get(self.cursor).copied()
     }
 
     fn selected_key(&self) -> Option<String> {
@@ -660,13 +689,160 @@ impl EnvyApp {
         if index >= self.projects.len() {
             return;
         }
+        let changed = self.project_ix != Some(index);
         self.project_ix = Some(index);
         self.file_ix = default_file_index(&self.projects[index]);
         if focus_keys {
             self.zone = Zone::Keys;
         }
+        if changed {
+            self.diff_left = None;
+            self.diff_right = None;
+            self.diff_left_doc = None;
+            self.diff_right_doc = None;
+            self.diff_menu = None;
+            self.diff_report = None;
+        }
         self.load_selected_file(cx);
+        if changed && self.diff_open {
+            self.load_diff(cx);
+        }
+        self.scroll_project_into_view();
         self.focus_self(window, cx);
+        cx.notify();
+    }
+
+    fn remember_project(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(root) = self.projects.get(index).map(|project| project.root.clone()) else {
+            return;
+        };
+        let before = self.config.recent_projects.clone();
+        self.config.note_recent(&root);
+        if self.config.recent_projects != before {
+            self.persist_config(cx);
+        }
+    }
+
+    fn visible_project_indexes(&self) -> Vec<usize> {
+        let query = self.filter_query.trim().to_ascii_lowercase();
+        let mut indexes: Vec<usize> = self
+            .projects
+            .iter()
+            .enumerate()
+            .filter(|(_, project)| {
+                query.is_empty()
+                    || fuzzy_hit(&project.name, &query)
+                    || fuzzy_hit(&project.root.display().to_string(), &query)
+                    || fuzzy_hit(&project.branch, &query)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        let favorites = self.config.favorites.clone();
+        let recent = self.config.recent_projects.clone();
+        indexes.sort_by(|&left, &right| {
+            let a = &self.projects[left];
+            let b = &self.projects[right];
+            sidebar_rank(&a.root, &a.name, &favorites, &recent)
+                .cmp(&sidebar_rank(&b.root, &b.name, &favorites, &recent))
+                .then(left.cmp(&right))
+        });
+        indexes
+    }
+
+    fn scroll_project_into_view(&self) {
+        let Some(index) = self.project_ix else {
+            return;
+        };
+        let Some(position) = self
+            .visible_project_indexes()
+            .iter()
+            .position(|visible| *visible == index)
+        else {
+            return;
+        };
+        self.project_scroll.scroll_to_item(position);
+    }
+
+    fn focus_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.zone = Zone::Projects;
+        self.scroll_project_into_view();
+        self.focus_self(window, cx);
+        cx.notify();
+    }
+
+    fn focus_keys_zone(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.open.is_none() {
+            if let Some(index) = self.project_ix {
+                self.remember_project(index, cx);
+                self.select_project(index, true, window, cx);
+            }
+            return;
+        }
+        self.zone = Zone::Keys;
+        self.focus_self(window, cx);
+        cx.notify();
+    }
+
+    fn toggle_favorite_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self
+            .project_ix
+            .and_then(|index| self.projects.get(index))
+            .map(|project| project.root.clone())
+        else {
+            self.status = "Select a project first.".into();
+            cx.notify();
+            return;
+        };
+        let pinned = self.config.toggle_favorite(&root);
+        self.persist_config(cx);
+        self.status = if pinned {
+            "Pinned to the top.".into()
+        } else {
+            "Unpinned.".into()
+        };
+        self.scroll_project_into_view();
+        cx.notify();
+    }
+
+    fn open_filtered_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let visible = self.visible_project_indexes();
+        let index = self
+            .project_ix
+            .filter(|index| visible.contains(index))
+            .or_else(|| visible.first().copied());
+        if let Some(index) = index {
+            self.remember_project(index, cx);
+            self.select_project(index, true, window, cx);
+        }
+    }
+
+    fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.overlay, Overlay::None) || self.editor.is_some() {
+            return;
+        }
+        let handle = if self.zone == Zone::Keys {
+            self.key_filter.focus_handle(cx)
+        } else {
+            self.project_filter.focus_handle(cx)
+        };
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    fn clear_key_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.key_query.clear();
+        self.key_filter
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.focus_self(window, cx);
+        cx.notify();
+    }
+
+    fn clear_project_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.filter_query.clear();
+        self.project_filter
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.focus_self(window, cx);
+        self.scroll_project_into_view();
         cx.notify();
     }
 
@@ -804,8 +980,9 @@ impl EnvyApp {
                         self.cursor = 0;
                         self.revealed.clear();
                         self.close_editor();
-                        self.choose_diff_target();
-                        self.load_diff(cx);
+                        if self.diff_open {
+                            self.load_diff(cx);
+                        }
                         if let Some(key) = self.pending_key.take() {
                             self.jump_to_key(&key);
                             self.status = format!("Jumped to {key}");
@@ -881,45 +1058,106 @@ impl EnvyApp {
         .detach();
     }
 
-    fn choose_diff_target(&mut self) {
+    fn choose_diff_sides(&mut self) {
         let Some(project) = self.project_ix.and_then(|ix| self.projects.get(ix)) else {
-            self.diff_ix = None;
+            self.diff_left = None;
+            self.diff_right = None;
             return;
         };
-        let current = self.file_ix;
-        self.diff_ix = project
-            .files
-            .iter()
-            .enumerate()
-            .find(|(index, file)| Some(*index) != current && is_example_filename(&file.name))
-            .map(|(index, _)| index)
-            .or_else(|| {
-                project
-                    .files
-                    .iter()
-                    .enumerate()
-                    .find(|(index, _)| Some(*index) != current)
-                    .map(|(index, _)| index)
-            });
+        if project.files.is_empty() {
+            self.diff_left = None;
+            self.diff_right = None;
+            return;
+        }
+        let last = project.files.len() - 1;
+        let current = self.file_ix.unwrap_or(0).min(last);
+        if self.diff_right.is_none_or(|index| index > last) {
+            self.diff_right = Some(current);
+        }
+        let right = self.diff_right.unwrap_or(current);
+        let left_bad = self
+            .diff_left
+            .is_none_or(|index| index > last || (index == right && project.files.len() > 1));
+        if left_bad {
+            self.diff_left = project
+                .files
+                .iter()
+                .enumerate()
+                .find(|(index, file)| *index != right && is_example_filename(&file.name))
+                .map(|(index, _)| index)
+                .or_else(|| {
+                    project
+                        .files
+                        .iter()
+                        .enumerate()
+                        .find(|(index, _)| *index != right)
+                        .map(|(index, _)| index)
+                })
+                .or(Some(right));
+        }
+    }
+
+    fn side_index(&self, side: DiffSide) -> Option<usize> {
+        match side {
+            DiffSide::Left => self.diff_left,
+            DiffSide::Right => self.diff_right,
+        }
+    }
+
+    fn side_path(&self, side: DiffSide) -> Option<PathBuf> {
+        let project = self.projects.get(self.project_ix?)?;
+        let index = self.side_index(side)?;
+        Some(project.files.get(index)?.path.clone())
+    }
+
+    fn side_name(&self, side: DiffSide) -> String {
+        self.side_path(side)
+            .and_then(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "Choose a file".into())
+    }
+
+    fn doc_if_open(&self, path: &Path) -> Option<EnvDocument> {
+        self.open
+            .as_ref()
+            .filter(|open| open.path == path)
+            .map(|open| open.document.clone())
     }
 
     fn load_diff(&mut self, cx: &mut Context<Self>) {
+        self.choose_diff_sides();
         self.diff_epoch = self.diff_epoch.wrapping_add(1);
         let epoch = self.diff_epoch;
         self.diff_report = None;
-        let Some(path) = self.diff_path() else {
-            self.diff_doc = None;
+        let Some(left_path) = self.side_path(DiffSide::Left) else {
+            self.diff_left_doc = None;
+            self.diff_right_doc = None;
             return;
         };
-        let left = self.open.as_ref().map(|open| open.document.clone());
+        let Some(right_path) = self.side_path(DiffSide::Right) else {
+            self.diff_left_doc = None;
+            self.diff_right_doc = None;
+            return;
+        };
+        let left_mem = self.doc_if_open(&left_path);
+        let right_mem = self.doc_if_open(&right_path);
         cx.spawn(async move |this, async_cx| {
             let loaded = async_cx
                 .background_executor()
                 .spawn(async move {
-                    let text = std::fs::read_to_string(&path).ok()?;
-                    let right = EnvDocument::parse(&text);
-                    let report = left.as_ref().map(|left| diff::diff(left, &right));
-                    Some((right, report))
+                    let left = match left_mem {
+                        Some(doc) => doc,
+                        None => EnvDocument::parse(&std::fs::read_to_string(&left_path).ok()?),
+                    };
+                    let right = match right_mem {
+                        Some(doc) => doc,
+                        None => EnvDocument::parse(&std::fs::read_to_string(&right_path).ok()?),
+                    };
+                    let report = diff::diff(&left, &right);
+                    Some((left, right, report))
                 })
                 .await;
             let _ = this.update(async_cx, |view, cx| {
@@ -927,13 +1165,16 @@ impl EnvyApp {
                     return;
                 }
                 match loaded {
-                    Some((right, report)) => {
-                        view.diff_doc = Some(right);
-                        view.diff_report = report;
+                    Some((left, right, report)) => {
+                        view.diff_left_doc = Some(left);
+                        view.diff_right_doc = Some(right);
+                        view.diff_report = Some(report);
                     }
                     None => {
-                        view.diff_doc = None;
+                        view.diff_left_doc = None;
+                        view.diff_right_doc = None;
                         view.diff_report = None;
+                        view.status = "Couldn't read one of those files.".into();
                     }
                 }
                 cx.notify();
@@ -942,14 +1183,30 @@ impl EnvyApp {
         .detach();
     }
 
+    fn refresh_open_side(&mut self) {
+        let Some(open) = self.open.as_ref() else {
+            return;
+        };
+        let path = open.path.clone();
+        let doc = open.document.clone();
+        if self.side_path(DiffSide::Left).as_ref() == Some(&path) {
+            self.diff_left_doc = Some(doc.clone());
+        }
+        if self.side_path(DiffSide::Right).as_ref() == Some(&path) {
+            self.diff_right_doc = Some(doc);
+        }
+    }
+
     fn recompute_diff(&mut self, cx: &mut Context<Self>) {
         if !self.diff_open {
             return;
         }
-        let Some(left) = self.open.as_ref().map(|open| open.document.clone()) else {
+        self.refresh_open_side();
+        let Some(left) = self.diff_left_doc.clone() else {
+            self.load_diff(cx);
             return;
         };
-        let Some(right) = self.diff_doc.clone() else {
+        let Some(right) = self.diff_right_doc.clone() else {
             self.load_diff(cx);
             return;
         };
@@ -965,15 +1222,31 @@ impl EnvyApp {
                     return;
                 }
                 view.diff_report = Some(report);
+                view.diff_stale = false;
                 cx.notify();
             });
         })
         .detach();
     }
 
-    fn diff_path(&self) -> Option<PathBuf> {
-        let project = self.projects.get(self.project_ix?)?;
-        Some(project.files.get(self.diff_ix?)?.path.clone())
+    fn set_diff_side(&mut self, side: DiffSide, index: usize, cx: &mut Context<Self>) {
+        match side {
+            DiffSide::Left => {
+                if self.diff_right == Some(index) {
+                    self.diff_right = self.diff_left;
+                }
+                self.diff_left = Some(index);
+            }
+            DiffSide::Right => {
+                if self.diff_left == Some(index) {
+                    self.diff_left = self.diff_right;
+                }
+                self.diff_right = Some(index);
+            }
+        }
+        self.diff_menu = None;
+        self.load_diff(cx);
+        cx.notify();
     }
 
     fn focus_self(&self, window: &mut Window, cx: &mut App) {
@@ -1081,16 +1354,20 @@ impl EnvyApp {
     fn move_delta(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         match self.zone {
             Zone::Projects => {
-                let len = self.projects.len() as isize;
-                if len == 0 {
+                let visible = self.visible_project_indexes();
+                if visible.is_empty() {
                     return;
                 }
-                let current = self.project_ix.unwrap_or(0) as isize;
-                let next = (current + delta).clamp(0, len - 1) as usize;
-                self.select_project(next, false, window, cx);
+                let current = self
+                    .project_ix
+                    .and_then(|index| visible.iter().position(|item| *item == index))
+                    .map(|position| position as isize)
+                    .unwrap_or(-1);
+                let next_pos = (current + delta).clamp(0, visible.len() as isize - 1) as usize;
+                self.select_project(visible[next_pos], false, window, cx);
             }
             Zone::Keys => {
-                let len = self.entry_nodes().len() as isize;
+                let len = self.visible_entry_nodes().len() as isize;
                 if len == 0 {
                     return;
                 }
@@ -1115,10 +1392,6 @@ impl EnvyApp {
 
     fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match &self.overlay {
-            Overlay::Palette => {
-                self.activate_palette(window, cx);
-                return;
-            }
             Overlay::Paste(_) => {
                 self.apply_overlay_paste(window, cx);
                 return;
@@ -1132,7 +1405,13 @@ impl EnvyApp {
             Overlay::None => {}
         }
         if self.zone == Zone::Projects {
-            if let Some(index) = self.project_ix {
+            let visible = self.visible_project_indexes();
+            let index = self
+                .project_ix
+                .filter(|index| visible.contains(index))
+                .or_else(|| visible.first().copied());
+            if let Some(index) = index {
+                self.remember_project(index, cx);
                 self.select_project(index, true, window, cx);
             }
             return;
@@ -1174,6 +1453,27 @@ impl EnvyApp {
             self.close_editor();
             self.focus_self(window, cx);
             cx.notify();
+            return;
+        }
+        if self.diff_menu.is_some() {
+            self.diff_menu = None;
+            cx.notify();
+            return;
+        }
+        let key_typed = self.key_filter.read(cx).value().to_string();
+        let key_focused = self.key_filter.focus_handle(cx).is_focused(window);
+        let typed = self.project_filter.read(cx).value().to_string();
+        let filter_focused = self.project_filter.focus_handle(cx).is_focused(window);
+        if key_focused || (self.zone == Zone::Keys && !key_typed.is_empty()) {
+            self.clear_key_filter(window, cx);
+            return;
+        }
+        if filter_focused || !typed.is_empty() || !self.filter_query.is_empty() {
+            self.clear_project_filter(window, cx);
+            return;
+        }
+        if !key_typed.is_empty() || !self.key_query.is_empty() {
+            self.clear_key_filter(window, cx);
             return;
         }
         if self.open.as_ref().is_some_and(|open| open.external_change) {
@@ -1531,7 +1831,7 @@ impl EnvyApp {
         open.mutate(|document| {
             document.remove_entry_at(node);
         });
-        let len = self.entry_nodes().len();
+        let len = self.visible_entry_nodes().len();
         if len == 0 {
             self.cursor = 0;
         } else if self.cursor >= len {
@@ -1590,107 +1890,6 @@ impl EnvyApp {
         self.status = "Reloading…".into();
         self.io_queue.push_back(IoJob::Reload { epoch, path });
         self.pump_io(cx);
-    }
-
-    fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.overlay = Overlay::Palette;
-        self.palette_ix = 0;
-        self.palette_input.update(cx, |input, cx| {
-            input.set_value("", window, cx);
-        });
-        self.refresh_palette_with(cx);
-        let handle = self.palette_input.focus_handle(cx);
-        window.focus(&handle, cx);
-        cx.notify();
-    }
-
-    fn refresh_palette_with(&mut self, cx: &App) {
-        let query = self.palette_input.read(cx).value().to_string();
-        self.palette_hits = search(&self.projects, &self.commands(), &query, 40);
-        if self.palette_ix >= self.palette_hits.len() {
-            self.palette_ix = 0;
-        }
-    }
-
-    fn move_palette(&mut self, down: bool, cx: &mut Context<Self>) {
-        if self.palette_hits.is_empty() {
-            return;
-        }
-        if down {
-            self.palette_ix = (self.palette_ix + 1).min(self.palette_hits.len() - 1);
-        } else {
-            self.palette_ix = self.palette_ix.saturating_sub(1);
-        }
-        cx.notify();
-    }
-
-    fn activate_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.refresh_palette_with(cx);
-        let Some(hit) = self.palette_hits.get(self.palette_ix).cloned() else {
-            return;
-        };
-        self.overlay = Overlay::None;
-        match hit.kind {
-            SearchKind::Command => {
-                self.run_command(hit.command.as_deref().unwrap_or(""), window, cx)
-            }
-            SearchKind::Project => {
-                if let Some(index) = hit.project {
-                    self.select_project(index, true, window, cx);
-                }
-            }
-            SearchKind::File => {
-                if let Some(project) = hit.project {
-                    self.project_ix = Some(project);
-                    if let Some(file) = hit.file {
-                        self.select_file(file, window, cx);
-                    }
-                }
-            }
-            SearchKind::Key => {
-                if let Some(project) = hit.project {
-                    self.project_ix = Some(project);
-                    if let Some(file) = hit.file {
-                        self.file_ix = Some(file);
-                        self.pending_key = hit.key.clone();
-                        self.load_selected_file(cx);
-                    }
-                    self.zone = Zone::Keys;
-                    self.focus_self(window, cx);
-                    cx.notify();
-                }
-            }
-        }
-    }
-
-    fn run_command(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        match id {
-            "add-folder" => self.open_add_folder(window, cx),
-            "new-key" => self.begin_new_key(window, cx),
-            "from-example" => self.new_from_example(cx),
-            "diff" => self.toggle_diff(cx),
-            "show-all" => {
-                self.show_all = true;
-                self.status = "Showing all values.".into();
-                cx.notify();
-            }
-            "hide-all" => {
-                self.show_all = false;
-                self.revealed.clear();
-                self.status = "Values hidden.".into();
-                cx.notify();
-            }
-            "settings" => self.open_settings(window, cx),
-            "refresh" => {
-                self.begin_scan(false, cx);
-                cx.notify();
-            }
-            "copy" => self.copy_selected(cx),
-            "quit" => {
-                self.close_requested(cx);
-            }
-            _ => {}
-        }
     }
 
     fn open_add_folder(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1828,32 +2027,36 @@ impl EnvyApp {
 
     fn toggle_diff(&mut self, cx: &mut Context<Self>) {
         self.diff_open = !self.diff_open;
+        self.diff_menu = None;
         if self.diff_open {
-            if self.diff_ix.is_none() {
-                self.choose_diff_target();
-            }
+            self.diff_left = None;
+            self.diff_right = None;
             self.load_diff(cx);
         }
         cx.notify();
     }
 
     fn cycle_diff(&mut self, cx: &mut Context<Self>) {
-        let Some(project) = self.project_ix.and_then(|ix| self.projects.get(ix)) else {
-            return;
-        };
-        if project.files.len() < 2 {
+        let file_count = self
+            .project_ix
+            .and_then(|ix| self.projects.get(ix))
+            .map(|project| project.files.len())
+            .unwrap_or(0);
+        if file_count < 2 {
             self.status = "This project has one env file.".into();
             cx.notify();
             return;
         }
-        let current_file = self.file_ix;
-        let start = self.diff_ix.unwrap_or(0);
-        let mut next = (start + 1) % project.files.len();
-        if Some(next) == current_file {
-            next = (next + 1) % project.files.len();
-        }
-        self.diff_ix = Some(next);
         self.diff_open = true;
+        self.choose_diff_sides();
+        let right = self.diff_right.unwrap_or(0);
+        let start = self.diff_left.unwrap_or(0);
+        let mut next = (start + 1) % file_count;
+        if next == right {
+            next = (next + 1) % file_count;
+        }
+        self.diff_left = Some(next);
+        self.diff_menu = None;
         self.load_diff(cx);
         cx.notify();
     }
@@ -1973,11 +2176,6 @@ impl EnvyApp {
                 self.cancel(window, cx);
                 cx.stop_propagation();
             }
-            "up" | "down" if matches!(self.overlay, Overlay::Palette) => {
-                self.refresh_palette_with(cx);
-                self.move_palette(event.keystroke.key == "down", cx);
-                cx.stop_propagation();
-            }
             "enter" if self.capture_enter() => {
                 self.confirm(window, cx);
                 cx.stop_propagation();
@@ -1987,7 +2185,7 @@ impl EnvyApp {
     }
 
     fn capture_enter(&self) -> bool {
-        matches!(self.overlay, Overlay::Palette | Overlay::Paste(_))
+        matches!(self.overlay, Overlay::Paste(_))
     }
 
     fn missing_names(&self) -> Vec<String> {
@@ -2090,6 +2288,28 @@ fn block_paste(
     }
 }
 
+fn write_pairs(document: &mut EnvDocument, pairs: &[(String, String)]) {
+    for (key, value) in pairs {
+        if document.set_value(key, value) == 0 {
+            document.push_entry(key.clone(), value.clone());
+        }
+    }
+}
+
+fn fuzzy_hit(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let haystack = haystack.to_ascii_lowercase();
+    if haystack.contains(needle) {
+        return true;
+    }
+    let mut rest = haystack.chars();
+    needle
+        .chars()
+        .all(|ch| rest.any(|candidate| candidate == ch))
+}
+
 fn display_value(value: &str, visible: bool) -> String {
     if value.is_empty() {
         return "empty".into();
@@ -2109,12 +2329,6 @@ impl Focusable for EnvyApp {
 
 impl Render for EnvyApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Palette query is read here so the list stays in step with the field
-        // even if the change event has not landed yet.
-        if matches!(self.overlay, Overlay::Palette) {
-            self.refresh_palette_with(cx);
-        }
-
         let theme_bg = cx.theme().background;
         let theme_fg = cx.theme().foreground;
         let theme_muted = cx.theme().muted_foreground;
@@ -2128,10 +2342,12 @@ impl Render for EnvyApp {
         let prod = rgb(0xE5484D);
 
         let project_rows = self.projects.clone();
+        let visible_projects = self.visible_project_indexes();
         let project_ix = self.project_ix;
+        let zone = self.zone;
         let entity = cx.entity();
         let mut sidebar = v_flex()
-            .w(px(232.))
+            .w(px(260.))
             .h_full()
             .bg(theme_sidebar)
             .text_color(theme_sidebar_fg)
@@ -2139,26 +2355,10 @@ impl Render for EnvyApp {
             .border_color(theme_border)
             .child(
                 h_flex()
-                    .px_3()
-                    .h(px(40.))
+                    .px_2()
+                    .h(px(36.))
                     .items_center()
                     .justify_between()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(
-                                gpui_kit::img(app_mark())
-                                    .w(px(18.))
-                                    .h(px(18.))
-                                    .rounded(px(4.)),
-                            )
-                            .child(
-                                div()
-                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                    .child("Envy"),
-                            ),
-                    )
                     .child({
                         let mut tools = h_flex().gap_2().items_center();
                         if self.scanning {
@@ -2173,19 +2373,22 @@ impl Render for EnvyApp {
                                         .child(files_found_label(self.scan_found)),
                                 );
                         }
-                        tools.child(
-                            icon_button("add-folder", IconName::FolderPlus, "Add folder").on_click(
-                                {
-                                    let entity = entity.clone();
-                                    move |_, window, cx| {
-                                        entity.update(cx, |this, cx| {
-                                            this.open_add_folder(window, cx)
-                                        });
-                                    }
-                                },
-                            ),
-                        )
-                    }),
+                        tools
+                    })
+                    .child(
+                        icon_button("add-folder", IconName::FolderPlus, "Add folder").on_click({
+                            let entity = entity.clone();
+                            move |_, window, cx| {
+                                entity.update(cx, |this, cx| this.open_add_folder(window, cx));
+                            }
+                        }),
+                    ),
+            )
+            .child(
+                div()
+                    .px_2()
+                    .pb_1()
+                    .child(Input::new(&self.project_filter).small()),
             );
         if self.booting && project_rows.is_empty() {
             sidebar = sidebar.child(
@@ -2206,11 +2409,32 @@ impl Render for EnvyApp {
                     .child("No folders yet."),
             );
         }
-        for (index, project) in project_rows.iter().enumerate() {
+        let mut project_list = v_flex()
+            .id("project-list")
+            .size_full()
+            .overflow_y_scroll()
+            .track_scroll(&self.project_scroll);
+        if !project_rows.is_empty() && visible_projects.is_empty() {
+            project_list = project_list.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_sm()
+                    .text_color(theme_muted)
+                    .child("No matching projects."),
+            );
+        }
+        for (visible_ix, index) in visible_projects.iter().copied().enumerate() {
+            let project = &project_rows[index];
             let selected = project_ix == Some(index);
+            let focused = selected && zone == Zone::Projects;
+            let favorite = self.config.is_favorite(&project.root);
             let entity = entity.clone();
+            let star_entity = entity.clone();
+            let group = SharedString::from(format!("project-row-{index}"));
             let mut row = h_flex()
-                .id(SharedString::from(format!("project-{index}")))
+                .id(SharedString::from(format!("project-{visible_ix}")))
+                .group(group.clone())
                 .mx_2()
                 .px_2()
                 .py(px(4.))
@@ -2224,10 +2448,16 @@ impl Render for EnvyApp {
                     project.root.display()
                 )))
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                    entity.update(cx, |this, cx| this.select_project(index, true, window, cx));
+                    entity.update(cx, |this, cx| {
+                        this.remember_project(index, cx);
+                        this.select_project(index, false, window, cx);
+                    });
                 });
             if selected {
                 row = row.bg(theme_accent);
+            }
+            if focused {
+                row = row.border_l_2().border_color(cx.theme().primary);
             }
             if project.missing_vs_example {
                 row = row.child(
@@ -2242,17 +2472,59 @@ impl Render for EnvyApp {
             }
             row = row.child(
                 v_flex()
+                    .flex_1()
                     .min_w(px(0.))
-                    .child(div().text_sm().child(project.name.clone()))
+                    .child(
+                        div()
+                            .text_sm()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(project.name.clone()),
+                    )
                     .child(
                         div()
                             .text_xs()
                             .text_color(theme_muted)
+                            .overflow_hidden()
+                            .whitespace_nowrap()
                             .child(project.branch.clone()),
                     ),
             );
-            sidebar = sidebar.child(row);
+            let mut star = div().flex_shrink_0();
+            if !favorite {
+                star = star.invisible().group_hover(group, |style| style.visible());
+            }
+            row = row.child(
+                star.child(
+                    icon_button(
+                        SharedString::from(format!("pin-{index}")),
+                        if favorite {
+                            IconName::Star
+                        } else {
+                            IconName::StarOff
+                        },
+                        if favorite { "Unpin" } else { "Pin to the top" },
+                    )
+                    .on_click(move |_, _, cx| {
+                        star_entity.update(cx, |this, cx| {
+                            this.project_ix = Some(index);
+                            this.toggle_favorite_selected(cx);
+                        });
+                    }),
+                ),
+            );
+            project_list = project_list.child(row);
         }
+        sidebar = sidebar.child(
+            div()
+                .id("project-scroll-host")
+                .relative()
+                .flex_1()
+                .min_h(px(0.))
+                .w_full()
+                .child(project_list)
+                .child(Scrollbar::vertical(&self.project_scroll).mode(ScrollbarMode::Always)),
+        );
 
         let file_tabs = self
             .project_ix
@@ -2299,7 +2571,7 @@ impl Render for EnvyApp {
         }
 
         let missing = self.missing_names();
-        let nodes = self.entry_nodes();
+        let nodes = self.visible_entry_nodes();
         let cursor = self.cursor;
         let show_all = self.show_all;
         let revealed = self.revealed.clone();
@@ -2347,20 +2619,22 @@ impl Render for EnvyApp {
             );
         }
         if rows_src.is_empty() && self.open.is_some() {
-            table = table.child(
-                div()
-                    .p_4()
-                    .text_color(theme_muted)
-                    .child("No keys. N adds one."),
-            );
+            let note = if self.key_query.trim().is_empty() {
+                "No keys. N adds one."
+            } else {
+                "No matching keys."
+            };
+            table = table.child(div().p_4().text_color(theme_muted).child(note));
         }
         for (row_ix, (node, key, value, exported)) in rows_src.iter().enumerate() {
             let selected = cursor == row_ix && self.zone == Zone::Keys;
             let visible = show_all || revealed.contains(key);
             let entity = cx.entity();
             let key_for_click = key.clone();
+            let key_group = SharedString::from(format!("key-row-{node}"));
             let mut row = h_flex()
                 .id(SharedString::from(format!("key-{node}")))
+                .group(key_group.clone())
                 .mx_2()
                 .px_2()
                 .h(px(26.))
@@ -2447,20 +2721,30 @@ impl Render for EnvyApp {
                         .child(shown),
                 );
             }
-            if selected {
-                let entity = cx.entity();
-                let reveal = entity.clone();
-                row = row.child(
+            let copy_entity = cx.entity();
+            let reveal_entity = cx.entity();
+            let mut actions = h_flex().gap(px(1.)).flex_shrink_0();
+            if !selected {
+                actions = actions
+                    .invisible()
+                    .group_hover(key_group, |style| style.visible());
+            }
+            actions = actions
+                .child(
                     icon_button(
                         SharedString::from(format!("copy-{node}")),
                         IconName::Copy,
                         "Copy value",
                     )
                     .on_click(move |_, _, cx| {
-                        entity.update(cx, |this, cx| this.copy_selected(cx));
+                        copy_entity.update(cx, |this, cx| {
+                            this.zone = Zone::Keys;
+                            this.cursor = row_ix;
+                            this.copy_selected(cx);
+                        });
                     }),
-                );
-                row = row.child(
+                )
+                .child(
                     icon_button(
                         SharedString::from(format!("eye-{node}")),
                         if visible {
@@ -2471,10 +2755,14 @@ impl Render for EnvyApp {
                         if visible { "Hide value" } else { "Show value" },
                     )
                     .on_click(move |_, _, cx| {
-                        reveal.update(cx, |this, cx| this.toggle_reveal(cx));
+                        reveal_entity.update(cx, |this, cx| {
+                            this.zone = Zone::Keys;
+                            this.cursor = row_ix;
+                            this.toggle_reveal(cx);
+                        });
                     }),
                 );
-            }
+            row = row.child(actions);
             table = table.child(row);
         }
         if editing_new {
@@ -2518,7 +2806,7 @@ impl Render for EnvyApp {
             .map(|open| open.path.display().to_string())
             .unwrap_or_default();
         let status = self.status.clone();
-        let hints = "j k  enter  c  space  n  ctrl-k  ?";
+        let hints = "j k  enter  tab  /  f  ?";
         let dirty = self.open.as_ref().is_some_and(|open| open.is_dirty());
         let toolbar = self.toolbar(cx);
 
@@ -2530,7 +2818,21 @@ impl Render for EnvyApp {
             .text_color(theme_fg)
             .child(tabs)
             .child(toolbar)
-            .child(div().flex_1().min_h(px(0.)).child(table))
+            .child(if self.diff_open {
+                self.diff_view(theme_fg, theme_muted, theme_border, mono.clone(), cx)
+            } else {
+                v_flex()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .child(
+                        div()
+                            .px_2()
+                            .pt_1()
+                            .pb_1()
+                            .child(Input::new(&self.key_filter).small()),
+                    )
+                    .child(div().flex_1().min_h(px(0.)).child(table))
+            })
             .child(
                 h_flex()
                     .h(px(28.))
@@ -2625,7 +2927,9 @@ impl Render for EnvyApp {
             .id("envy-root")
             .key_context("Envy")
             .track_focus(&self.focus)
-            .size_full()
+            .flex_1()
+            .w_full()
+            .min_h(px(0.))
             .bg(theme_bg)
             .text_color(theme_fg)
             .font_family(ui_font)
@@ -2634,11 +2938,26 @@ impl Render for EnvyApp {
             .on_action(cx.listener(|this, _: &MoveUp, window, cx| this.move_delta(-1, window, cx)))
             .on_action(cx.listener(|this, _: &MoveLeft, window, cx| this.move_file(-1, window, cx)))
             .on_action(cx.listener(|this, _: &MoveRight, window, cx| this.move_file(1, window, cx)))
+            .on_action(
+                cx.listener(|this, _: &FocusSidebar, window, cx| this.focus_sidebar(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &FocusKeys, window, cx| this.focus_keys_zone(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ToggleFavorite, _, cx| this.toggle_favorite_selected(cx)),
+            )
+            .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
+                this.focus_search(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &SwitchZone, window, cx| {
                 this.zone = match this.zone {
                     Zone::Projects => Zone::Keys,
                     Zone::Keys => Zone::Projects,
                 };
+                if this.zone == Zone::Projects {
+                    this.scroll_project_into_view();
+                }
                 this.focus_self(window, cx);
                 cx.notify();
             }))
@@ -2661,9 +2980,6 @@ impl Render for EnvyApp {
                 this.focus_self(window, cx);
                 cx.notify();
             }))
-            .on_action(
-                cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)),
-            )
             .on_action(cx.listener(|this, _: &Refresh, _, cx| {
                 this.begin_scan(false, cx);
                 cx.notify();
@@ -2686,144 +3002,303 @@ impl Render for EnvyApp {
             .child(sidebar)
             .child(center);
 
-        if self.diff_open {
-            root = root.child(self.diff_panel(
-                theme_bg,
-                theme_fg,
-                theme_muted,
-                theme_border,
-                theme_danger,
-                mono,
-                cx,
-            ));
-        }
         if !matches!(self.overlay, Overlay::None) {
             root = root.child(self.overlay_view(window, cx));
         }
-        root
+
+        v_flex()
+            .size_full()
+            .bg(theme_bg)
+            .text_color(theme_fg)
+            .child(
+                TitleBar::new().child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            gpui_kit::img(app_mark())
+                                .w(px(16.))
+                                .h(px(16.))
+                                .rounded(px(4.)),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                .child("Envy"),
+                        ),
+                ),
+            )
+            .child(root.flex_1().min_h(px(0.)).w_full())
     }
 }
 
 impl EnvyApp {
-    fn diff_panel(
+    fn diff_view(
         &self,
-        bg: impl Clone + Into<gpui_kit::Hsla>,
         fg: impl Clone + Into<gpui_kit::Hsla>,
         muted: impl Clone + Into<gpui_kit::Hsla>,
         border: impl Clone + Into<gpui_kit::Hsla>,
-        danger: impl Clone + Into<gpui_kit::Hsla>,
         mono: SharedString,
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
-        let _ = (bg, fg);
-        let name = self
-            .diff_ix
-            .and_then(|ix| {
-                self.project_ix
-                    .and_then(|project| self.projects.get(project))
-                    .and_then(|project| project.files.get(ix))
-                    .map(|file| file.name.clone())
-            })
-            .unwrap_or_else(|| "nothing".into());
+        let fg: gpui_kit::Hsla = fg.into();
+        let muted: gpui_kit::Hsla = muted.into();
+        let border: gpui_kit::Hsla = border.into();
+        let left_name = self.side_name(DiffSide::Left);
+        let right_name = self.side_name(DiffSide::Right);
+        let one_file = self
+            .project_ix
+            .and_then(|ix| self.projects.get(ix))
+            .is_some_and(|project| project.files.len() < 2);
         let mut panel = v_flex()
-            .w(px(300.))
-            .h_full()
-            .border_l_1()
-            .border_color(border.clone())
-            .bg(cx.theme().sidebar)
+            .flex_1()
+            .min_h(px(0.))
+            .bg(cx.theme().background)
             .child(
-                div()
+                h_flex()
                     .px_3()
                     .py_2()
-                    .text_sm()
+                    .gap_3()
+                    .items_start()
                     .border_b_1()
                     .border_color(border)
-                    .child(format!("Compared with {name}")),
+                    .child(self.file_picker(DiffSide::Left, &left_name, cx))
+                    .child(div().flex_1())
+                    .child(self.file_picker(DiffSide::Right, &right_name, cx)),
             );
-        let Some(report) = &self.diff_report else {
-            return panel.child(div().p_3().text_color(muted).child(if self.open.is_none() {
-                "No file open."
-            } else {
-                "Comparing…"
-            }));
-        };
-        let missing = report.missing_on_left().count();
-        let entity = cx.entity();
+        if one_file {
+            return panel.child(
+                div()
+                    .p_4()
+                    .text_color(muted)
+                    .child("This project has one env file."),
+            );
+        }
+        let missing_left = cx.entity();
+        let missing_right = cx.entity();
         panel = panel.child(
             h_flex()
-                .px_2()
+                .px_3()
                 .py_1()
                 .gap_2()
                 .items_center()
+                .border_b_1()
+                .border_color(border)
                 .child(
                     icon_button(
-                        "copy-missing",
-                        IconName::ArrowRightLeft,
-                        "Add keys this file is missing",
+                        "copy-missing-to-left",
+                        IconName::ArrowLeft,
+                        "Copy keys that exist only on the right into the left file",
                     )
+                    .label("Copy missing")
                     .on_click(move |_, _, cx| {
-                        entity.update(cx, |this, cx| this.add_missing_keys(cx));
+                        missing_left.update(cx, |this, cx| this.copy_missing(DiffSide::Right, cx));
                     }),
                 )
                 .child(
                     div()
+                        .flex_1()
                         .text_xs()
-                        .text_color(muted.clone())
-                        .child(if missing == 0 {
-                            "Nothing missing".into()
-                        } else {
-                            format!("{missing} missing")
-                        }),
+                        .text_color(muted)
+                        .child(format!("{left_name}    key    {right_name}")),
+                )
+                .child(
+                    icon_button(
+                        "copy-missing-to-right",
+                        IconName::ArrowRight,
+                        "Copy keys that exist only on the left into the right file",
+                    )
+                    .label("Copy missing")
+                    .on_click(move |_, _, cx| {
+                        missing_right.update(cx, |this, cx| this.copy_missing(DiffSide::Left, cx));
+                    }),
                 ),
         );
+        let Some(report) = self.diff_report.clone() else {
+            return panel.child(div().p_3().text_color(muted).child("Comparing…"));
+        };
         let mut body = v_flex()
             .id("diff-body")
             .flex_1()
+            .min_h(px(0.))
             .overflow_y_scroll()
-            .p_1()
-            .gap(px(2.))
-            .text_sm();
+            .p_2()
+            .gap(px(2.));
         for (index, row) in report.rows.iter().enumerate() {
-            let (mark, tint) = match row.kind {
-                diff::DiffKind::Same => ("=", cx.theme().success.opacity(0.14)),
-                diff::DiffKind::Different => ("≠", cx.theme().warning.opacity(0.22)),
-                diff::DiffKind::OnlyLeft => ("+", cx.theme().info.opacity(0.18)),
-                diff::DiffKind::OnlyRight => ("missing", cx.theme().danger.opacity(0.2)),
+            let (label, tint) = match row.kind {
+                diff::DiffKind::Same => ("Same", cx.theme().success.opacity(0.16)),
+                diff::DiffKind::Different => ("Differs", cx.theme().warning.opacity(0.24)),
+                diff::DiffKind::OnlyLeft => ("Left only", cx.theme().info.opacity(0.2)),
+                diff::DiffKind::OnlyRight => ("Right only", cx.theme().danger.opacity(0.2)),
             };
-            let left = row.left.as_deref().unwrap_or("");
-            let right = row.right.as_deref().unwrap_or("");
-            let visible = self.visible(&row.key);
-            let detail = match row.kind {
-                diff::DiffKind::Different => format!(
-                    "{}   {}",
-                    display_value(left, visible),
-                    display_value(right, visible)
-                ),
-                diff::DiffKind::OnlyLeft => display_value(left, visible),
-                diff::DiffKind::OnlyRight => display_value(right, visible),
-                diff::DiffKind::Same => display_value(left, visible),
-            };
-            let label = match row.kind {
-                diff::DiffKind::Same => "Equal",
-                diff::DiffKind::Different => "Differs",
-                diff::DiffKind::OnlyLeft => "Only in this file",
-                diff::DiffKind::OnlyRight => "Missing here",
-            };
-            body = body.child(
-                v_flex()
-                    .id(SharedString::from(format!("diff-row-{index}")))
+            let shown = self.visible(&row.key);
+            let left_text = row
+                .left
+                .as_deref()
+                .map(|value| display_value(value, shown))
+                .unwrap_or_else(|| "—".into());
+            let right_text = row
+                .right
+                .as_deref()
+                .map(|value| display_value(value, shown))
+                .unwrap_or_else(|| "—".into());
+            let to_right = cx.entity();
+            let to_left = cx.entity();
+            let mut line = h_flex()
+                .id(SharedString::from(format!("diff-row-{index}")))
+                .px_2()
+                .py(px(3.))
+                .gap_2()
+                .items_center()
+                .rounded(px(6.))
+                .bg(tint)
+                .child(div().w(px(76.)).flex_shrink_0().text_xs().child(label))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .font_family(mono.clone())
+                        .text_sm()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_color(if row.left.is_some() { fg } else { muted })
+                        .child(left_text),
+                );
+            if row.left.is_some() {
+                line = line.child(
+                    icon_button(
+                        SharedString::from(format!("diff-to-right-{index}")),
+                        IconName::ArrowRight,
+                        "Copy this value to the right file",
+                    )
+                    .on_click(move |_, _, cx| {
+                        to_right.update(cx, |this, cx| {
+                            this.copy_diff_row(index, DiffSide::Left, cx);
+                        });
+                    }),
+                );
+            }
+            line = line.child(
+                div()
+                    .w(px(168.))
+                    .flex_shrink_0()
+                    .font_family(mono.clone())
+                    .text_sm()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(row.key.clone()),
+            );
+            if row.right.is_some() {
+                line = line.child(
+                    icon_button(
+                        SharedString::from(format!("diff-to-left-{index}")),
+                        IconName::ArrowLeft,
+                        "Copy this value to the left file",
+                    )
+                    .on_click(move |_, _, cx| {
+                        to_left.update(cx, |this, cx| {
+                            this.copy_diff_row(index, DiffSide::Right, cx);
+                        });
+                    }),
+                );
+            }
+            line = line.child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .font_family(mono.clone())
+                    .text_sm()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_color(if row.right.is_some() { fg } else { muted })
+                    .child(right_text),
+            );
+            body = body.child(line);
+        }
+        panel.child(body)
+    }
+
+    fn file_picker(&self, side: DiffSide, name: &str, cx: &mut Context<Self>) -> gpui_kit::Div {
+        let open = self.diff_menu == Some(side);
+        let entity = cx.entity();
+        let picker_id = match side {
+            DiffSide::Left => "diff-pick-left",
+            DiffSide::Right => "diff-pick-right",
+        };
+        let mut picker = v_flex().w(px(240.)).gap_1().child(
+            h_flex()
+                .id(picker_id)
+                .px_2()
+                .h(px(28.))
+                .gap_2()
+                .items_center()
+                .justify_between()
+                .rounded(px(6.))
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().background)
+                .cursor_pointer()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .text_sm()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .child(name.to_string()),
+                )
+                .child(gpui_kit::component::Icon::new(IconName::ChevronDown).xsmall())
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.diff_menu = if this.diff_menu == Some(side) {
+                            None
+                        } else {
+                            Some(side)
+                        };
+                        cx.notify();
+                    });
+                }),
+        );
+        if open {
+            let files = self
+                .project_ix
+                .and_then(|ix| self.projects.get(ix))
+                .map(|project| project.files.clone())
+                .unwrap_or_default();
+            let mut menu = v_flex()
+                .id("diff-file-menu")
+                .max_h(px(180.))
+                .overflow_y_scroll()
+                .p_1()
+                .gap(px(1.))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().background);
+            for (index, file) in files.iter().enumerate() {
+                let entity = cx.entity();
+                let current = self.side_index(side) == Some(index);
+                let mut item = div()
+                    .id(SharedString::from(format!("{picker_id}-{index}")))
                     .px_2()
                     .py(px(3.))
-                    .rounded(px(6.))
-                    .bg(tint)
-                    .font_family(mono.clone())
-                    .tooltip(hover_tip(label))
-                    .child(format!("{mark}  {}", row.key))
-                    .child(div().text_xs().text_color(muted.clone()).child(detail)),
-            );
+                    .rounded(px(4.))
+                    .text_sm()
+                    .cursor_pointer()
+                    .child(file.name.clone())
+                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                        entity.update(cx, |this, cx| this.set_diff_side(side, index, cx));
+                    });
+                if current {
+                    item = item.bg(cx.theme().accent);
+                }
+                menu = menu.child(item);
+            }
+            picker = picker.child(menu);
         }
-        let _ = danger;
-        panel.child(body)
+        picker
     }
 
     fn toolbar(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
@@ -2833,20 +3308,12 @@ impl EnvyApp {
         let newer = cx.entity();
         let example = cx.entity();
         let settings = cx.entity();
-        let search = cx.entity();
         let show_all = self.show_all;
         h_flex()
             .px_2()
             .h(px(32.))
             .gap(px(1.))
             .items_center()
-            .child(
-                icon_button("tb-search", IconName::Search, "Search")
-                    .tooltip_with_action("Search", &OpenPalette, Some("Envy"))
-                    .on_click(move |_, window, cx| {
-                        search.update(cx, |this, cx| this.open_palette(window, cx));
-                    }),
-            )
             .child(
                 icon_button("tb-save", IconName::Save, "Save")
                     .tooltip_with_action("Save", &Save, Some("Envy"))
@@ -2858,7 +3325,7 @@ impl EnvyApp {
                     }),
             )
             .child(
-                icon_button("tb-diff", IconName::GitCompare, "Diff")
+                icon_button("tb-diff", IconName::GitCompare, "Compare two files")
                     .tooltip_with_action("Diff", &ToggleDiff, Some("Envy"))
                     .on_click(move |_, _, cx| {
                         diff.update(cx, |this, cx| this.toggle_diff(cx));
@@ -2919,7 +3386,6 @@ impl EnvyApp {
                 }
             });
         let panel = match &self.overlay {
-            Overlay::Palette => self.palette_panel(cx),
             Overlay::Settings => self.settings_panel(cx),
             Overlay::AddFolder => self.folder_panel(cx),
             Overlay::Paste(plan) => self.paste_panel(plan, cx),
@@ -2936,49 +3402,6 @@ impl EnvyApp {
                 .child(panel),
         );
         backdrop
-    }
-
-    fn palette_panel(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
-        let mut list = v_flex()
-            .id("palette-list")
-            .max_h(px(360.))
-            .overflow_y_scroll();
-        for (index, hit) in self.palette_hits.iter().enumerate() {
-            let selected = index == self.palette_ix;
-            let mut row = h_flex().px_3().py_1().gap_3().justify_between().text_sm();
-            if selected {
-                row = row.bg(cx.theme().sidebar_accent);
-            }
-            row = row
-                .child(
-                    div()
-                        .font_family(cx.theme().mono_font_family.clone())
-                        .child(hit.label.clone()),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(hit.detail.clone()),
-                );
-            list = list.child(row);
-        }
-        if self.palette_hits.is_empty() {
-            list = list.child(
-                div()
-                    .p_3()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("No matches."),
-            );
-        }
-        v_flex()
-            .bg(cx.theme().background)
-            .border_1()
-            .border_color(cx.theme().border)
-            .rounded_md()
-            .overflow_hidden()
-            .child(div().p_2().child(Input::new(&self.palette_input)))
-            .child(list)
     }
 
     fn settings_panel(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
@@ -3176,35 +3599,117 @@ impl EnvyApp {
             .child(list)
     }
 
-    fn add_missing_keys(&mut self, cx: &mut Context<Self>) {
+    fn copy_missing(&mut self, from: DiffSide, cx: &mut Context<Self>) {
         let Some(report) = self.diff_report.clone() else {
             self.status = "Nothing to compare.".into();
             cx.notify();
             return;
         };
-        let missing: Vec<(String, String)> = report
+        let pairs: Vec<(String, String)> = report
             .rows
             .into_iter()
-            .filter(|row| row.kind == diff::DiffKind::OnlyRight)
-            .map(|row| (row.key, row.right.unwrap_or_default()))
+            .filter_map(|row| {
+                let (kind, value) = match from {
+                    DiffSide::Left => (diff::DiffKind::OnlyLeft, row.left),
+                    DiffSide::Right => (diff::DiffKind::OnlyRight, row.right),
+                };
+                if row.kind == kind {
+                    Some((row.key, value.unwrap_or_default()))
+                } else {
+                    None
+                }
+            })
             .collect();
-        if missing.is_empty() {
-            self.status = "This file is not missing any keys.".into();
+        let to = match from {
+            DiffSide::Left => DiffSide::Right,
+            DiffSide::Right => DiffSide::Left,
+        };
+        self.put_pairs(to, pairs, cx);
+    }
+
+    fn copy_diff_row(&mut self, index: usize, from: DiffSide, cx: &mut Context<Self>) {
+        let Some(row) = self
+            .diff_report
+            .as_ref()
+            .and_then(|report| report.rows.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        let value = match from {
+            DiffSide::Left => row.left,
+            DiffSide::Right => row.right,
+        };
+        let Some(value) = value else {
+            self.status = "That side has no value for this key.".into();
+            cx.notify();
+            return;
+        };
+        let to = match from {
+            DiffSide::Left => DiffSide::Right,
+            DiffSide::Right => DiffSide::Left,
+        };
+        self.put_pairs(to, vec![(row.key, value)], cx);
+    }
+
+    fn put_pairs(&mut self, side: DiffSide, pairs: Vec<(String, String)>, cx: &mut Context<Self>) {
+        if pairs.is_empty() {
+            self.status = "Nothing to copy.".into();
             cx.notify();
             return;
         }
-        let count = missing.len();
-        let Some(open) = self.open.as_mut() else {
+        let count = pairs.len();
+        let Some(path) = self.side_path(side) else {
             return;
         };
-        open.mutate(|document| {
-            for (key, value) in missing {
-                document.push_entry(key, value);
+        let onto_open = self.open.as_ref().is_some_and(|open| open.path == path);
+        if onto_open {
+            let Some(open) = self.open.as_mut() else {
+                return;
+            };
+            open.mutate(|document| write_pairs(document, &pairs));
+            let cloned = self
+                .open
+                .as_ref()
+                .map(|open| open.document.clone())
+                .unwrap_or_default();
+            match side {
+                DiffSide::Left => self.diff_left_doc = Some(cloned),
+                DiffSide::Right => self.diff_right_doc = Some(cloned),
             }
-        });
-        self.mark_edited();
-        self.status = format!("Added {count} missing keys. Ctrl+S saves.");
+            self.mark_edited();
+            self.status = format!("Copied {count} into the open file. Ctrl+S saves.");
+        } else {
+            let doc = match side {
+                DiffSide::Left => self.diff_left_doc.as_mut(),
+                DiffSide::Right => self.diff_right_doc.as_mut(),
+            };
+            let Some(doc) = doc else {
+                self.status = "That file is still loading.".into();
+                cx.notify();
+                return;
+            };
+            write_pairs(doc, &pairs);
+            let text = doc.serialize();
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("file");
+            self.status = format!("Copied {count} into {name}.");
+            self.save_other(path, text, cx);
+        }
+        self.recompute_diff(cx);
         cx.notify();
+    }
+
+    fn save_other(&mut self, path: PathBuf, text: String, cx: &mut Context<Self>) {
+        self.io_queue.push_back(IoJob::Save {
+            seq: u64::MAX,
+            epoch: self.io_epoch,
+            path,
+            text,
+        });
+        self.pump_io(cx);
     }
 
     fn shortcuts_panel(&self, cx: &App) -> gpui_kit::Div {
@@ -3264,10 +3769,14 @@ impl EnvyApp {
 }
 
 const SHORTCUTS: &[(&str, &str)] = &[
-    ("j  k", "Move"),
-    ("Enter", "Edit the value in the row"),
+    ("j  k", "Move in the focused list"),
+    ("Enter", "Open the project, or edit the value"),
+    ("←  →  Tab", "Move between projects and keys"),
+    ("h  l", "Previous / next file"),
+    ("/  Ctrl+F", "Find in this list"),
+    ("f", "Pin or unpin the project"),
     ("Tab", "Commit the edit"),
-    ("Esc", "Cancel the edit"),
+    ("Esc", "Clear the filter, or cancel"),
     ("c", "Copy the value"),
     ("Space", "Show or hide the value"),
     ("a", "Show or hide every value"),
@@ -3277,10 +3786,9 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+Z", "Undo"),
     ("Ctrl+Y", "Redo"),
     ("Ctrl+S", "Save"),
-    ("Ctrl+K", "Search"),
     ("Ctrl+V", "Paste KEY=value lines"),
-    ("d", "Diff"),
-    ("]", "Next file to compare"),
+    ("d", "Compare two files"),
+    ("]", "Switch the left file"),
     ("Ctrl+Shift+N", "New file from example"),
     ("Ctrl+O", "Add a folder"),
     ("Ctrl+,", "Settings"),

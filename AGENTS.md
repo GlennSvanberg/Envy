@@ -16,7 +16,7 @@ crates/envy-core/          no window, no gpui
   discover.rs              parallel walk, path cache, git grouping, env file names
   diff.rs paste.rs         compare files, Vercel-style paste
   scaffold.rs              .env.example -> new file, secrets cleared
-  search.rs config.rs      palette scoring, config.toml
+  search.rs config.rs      key-name scoring (unused by the window), config.toml
   deeplink.rs hotkey.rs    envy:// and the global chord
   future.rs                named, unimplemented seams (age, self-decrypting HTML, git exposure)
 crates/envy/               the window
@@ -66,11 +66,12 @@ UI copy speaks to the user about their task, never about the implementation. Do 
 ## Design rules
 
 - Icons first. A button that has a Lucide icon uses it (`gpui_kit::assets::IconName`) with a hover tooltip. Text labels are for rows, empty states, and settings that are not a single action. The icon font comes from `gpui_kit::assets::AllAssets` in `main.rs`. The default asset subset does not contain the icons we use.
-- Never store values. Config, logs, search, and the palette may hold folder paths, theme, the hotkey, project names, and key names. They must not hold secret values. Do not log `Entry::value`.
+- Never store values. Config, logs, and the two filter fields may hold folder paths, theme, the hotkey, project names, and key names. They must not hold secret values. Do not log `Entry::value`. There is no command palette. Projects are filtered in the sidebar and keys are filtered above the variable list, by name only.
 - The atomic-save sibling (`filename.envy-tmp`, next to the target) exists only during `write_atomic`. Delete it on failure. Do not treat it as a backup, and do not discover it as an env file (`is_env_filename` rejects the suffix). On Windows the replace uses `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`, because `std::fs::rename` does not replace an existing file there.
 - Preserve comments and order. Untouched entries keep their raw line. `set_value` rewrites only the entries it changes. `serialize` is the way to write a document; do not add a `Display` that calls it (that recurses).
 - Edits are in memory until save. `OpenFile` is dirty when `serialize()` differs from `clean`. Undo and redo do not touch disk. Save on `Ctrl+S`, on switching files, and on window close.
-- Copy missing keys into the file that is open, using the other file's values. The other direction would write secrets into an example file. The user can switch files and press the button again.
+- Comparing two files is explicit: a left file and a right file, defaulting to `.env.example` and the file that is open. Each row can copy a value either direction. "Copy missing" copies keys that exist on only one side. Copying into the open file marks it dirty. Copying into the other file saves that file. Both are on purpose; the user picks the direction.
+- Favorites and recently opened projects are stored as paths on `Config` (`favorites`, `recent_projects`). They never store values. The sidebar order is favorites, then recent, then name.
 - `cmd` in a GPUI keystroke is the Super key. Bind `ctrl-` explicitly. `KeyBinding::new` does not resolve `secondary-`.
 - Tab commits an inline edit. The root captures Tab while an editor is open so the input's indent binding does not take it.
 - Production files get their red accent from a separate 2px bar. One `border_color` paints every edge, so it cannot also be the selection underline.

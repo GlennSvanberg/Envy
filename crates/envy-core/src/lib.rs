@@ -23,7 +23,7 @@ pub mod scaffold;
 pub mod search;
 pub mod session;
 
-pub use config::{config_dir, config_path, Config, Settings, ThemeSetting};
+pub use config::{config_dir, config_path, sidebar_rank, Config, Settings, ThemeSetting};
 pub use deeplink::Deeplink;
 pub use diff::{DiffKind, DiffReport, DiffRow};
 pub use discover::{

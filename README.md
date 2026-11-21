@@ -19,10 +19,10 @@ The window is [GPUI](https://github.com/zed-industries/zed) through [gpui-kit](h
 - Undo and redo (`Ctrl+Z`, `Ctrl+Y` or `Ctrl+Shift+Z`) apply to the open buffer. `Ctrl+S` writes the file. Switching files or closing the window also writes unsaved edits.
 - Atomic save. The new text is written to a sibling `*.envy-tmp` file, synced, then renamed over the original. A crash before the rename leaves the `.env` intact. The sibling is deleted if the save fails, and Envy never opens it as an env file.
 - Masked values (one dot per character), per-key reveal, and show-all. Copy clears the clipboard after 30 seconds unless you turn that off.
-- Diff against another file in the project. Rows are colored for equal, different, only in this file, and missing. One button copies the missing keys into the file you are editing.
+- Compare two files you pick. Keys line up in two columns. Each row can copy a value either way, and each side can copy every key it is missing.
 - Paste a block of `KEY=value` lines (the block Vercel's env UI copies). Envy shows a preview; Enter applies it.
 - New `.env.local` from `.env.example`: comments and safe defaults stay, secret values are cleared.
-- Search with `Ctrl+K` over project, file, and key names. Values are not searchable and are not stored in config or logs.
+- Find a project from the field at the top of the sidebar, and find a key from the field above the variable list. `/` or `Ctrl+F` focuses the field for the list you are in. Values are not searchable and are not stored in config or logs.
 - Light and dark, following the system, with an override. Production files (a `prod` or `production` segment in the name) get a thin red tab accent.
 - A single instance. `envy://` links and a second launch are handed to the window that is already open. `Ctrl+Alt+E` raises it (change the chord in settings). Closing the window quits. There is no tray icon.
 
@@ -32,11 +32,14 @@ Press `?` for the same list inside the window.
 
 | Key | Action |
 | --- | --- |
-| `j` `k` or `↑` `↓` | Move |
-| `h` `l` or `←` `→` | Previous / next file |
-| `Enter` | Edit the value in the row |
-| `Tab` | Commit the edit |
-| `Esc` | Cancel the edit, or close a panel |
+| `j` `k` or `↑` `↓` | Move in the focused list |
+| `Enter` | Open the project, or edit the value |
+| `←` `→` or `Tab` | Move between the project list and the keys |
+| `h` `l` | Previous / next file |
+| `/` or `Ctrl+F` | Find in the list you are in. `Esc` clears it |
+| `f` | Pin or unpin the selected project |
+| `Tab` | Commit an edit |
+| `Esc` | Clear the filter, cancel an edit, or close a panel |
 | `c` | Copy the value |
 | `Space` | Show or hide the value |
 | `a` | Show or hide every value |
@@ -46,10 +49,9 @@ Press `?` for the same list inside the window.
 | `Ctrl+Z` | Undo |
 | `Ctrl+Y` or `Ctrl+Shift+Z` | Redo |
 | `Ctrl+S` | Save |
-| `Ctrl+K` | Search projects, files, and key names |
 | `Ctrl+V` | Paste `KEY=value` lines |
-| `d` | Diff |
-| `]` | Next file to compare |
+| `d` | Compare two files |
+| `]` | Switch the left file in the comparison |
 | `Ctrl+Shift+N` | New `.env.local` from the example |
 | `Ctrl+O` | Add a folder |
 | `Ctrl+,` | Settings |
@@ -71,10 +73,6 @@ The same file in light, with the diff open. Green is equal, amber differs, blue 
 Editing the value in the row.
 
 ![Inline edit](docs/screenshots/inline-edit.png)
-
-Search.
-
-![Search](docs/screenshots/palette.png)
 
 First launch, before any folder is added.
 

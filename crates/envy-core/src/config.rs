@@ -62,6 +62,13 @@ pub struct Config {
     /// Project root → display name, when the git remote name is not what you want.
     #[serde(default)]
     pub project_names: BTreeMap<String, String>,
+    /// Project roots pinned to the top of the sidebar. Paths only.
+    /// Written before any `[table]`, because keys that follow a table belong to it.
+    #[serde(default)]
+    pub favorites: Vec<PathBuf>,
+    /// Project roots opened most recently, newest first. Paths only.
+    #[serde(default)]
+    pub recent_projects: Vec<PathBuf>,
 }
 
 impl Config {
@@ -78,6 +85,27 @@ impl Config {
 
     pub fn save(&self) -> io::Result<()> {
         self.save_to(&config_path())
+    }
+
+    pub fn is_favorite(&self, root: &Path) -> bool {
+        self.favorites.iter().any(|path| path == root)
+    }
+
+    /// Returns true when the project is pinned after the toggle.
+    pub fn toggle_favorite(&mut self, root: &Path) -> bool {
+        if let Some(index) = self.favorites.iter().position(|path| path == root) {
+            self.favorites.remove(index);
+            false
+        } else {
+            self.favorites.insert(0, root.to_path_buf());
+            true
+        }
+    }
+
+    pub fn note_recent(&mut self, root: &Path) {
+        self.recent_projects.retain(|path| path != root);
+        self.recent_projects.insert(0, root.to_path_buf());
+        self.recent_projects.truncate(24);
     }
 
     pub fn save_to(&self, path: &Path) -> io::Result<()> {
@@ -142,6 +170,8 @@ mod tests {
         config
             .project_names
             .insert("/work/billing".into(), "Billing API".into());
+        config.favorites.push(PathBuf::from("/work/billing"));
+        config.recent_projects.push(PathBuf::from("/work/app"));
         let dir = std::env::temp_dir().join(format!("envy-config-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -154,6 +184,40 @@ mod tests {
         assert!(!text.contains("SECRET"));
         let loaded = Config::load_from(&path);
         assert_eq!(loaded, config);
+        assert_eq!(loaded.favorites, vec![PathBuf::from("/work/billing")]);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sidebar_order_is_favorites_then_recent_then_name() {
+        let favorites = vec![PathBuf::from("/zeta"), PathBuf::from("/alpha")];
+        let recent = vec![PathBuf::from("/mid")];
+        let mut roots = vec!["/other", "/mid", "/zeta", "/alpha", "/beta"];
+        roots.sort_by(|left, right| {
+            sidebar_rank(Path::new(left), left, &favorites, &recent).cmp(&sidebar_rank(
+                Path::new(right),
+                right,
+                &favorites,
+                &recent,
+            ))
+        });
+        assert_eq!(roots, vec!["/zeta", "/alpha", "/mid", "/beta", "/other"]);
+    }
+}
+
+/// Sort key for the sidebar: pinned roots, then recently opened, then name.
+pub fn sidebar_rank(
+    root: &Path,
+    name: &str,
+    favorites: &[PathBuf],
+    recent: &[PathBuf],
+) -> (u8, usize, String) {
+    let name_key = name.to_ascii_lowercase();
+    if let Some(pos) = favorites.iter().position(|path| path == root) {
+        (0, pos, name_key)
+    } else if let Some(pos) = recent.iter().position(|path| path == root) {
+        (1, pos, name_key)
+    } else {
+        (2, 0, name_key)
     }
 }
