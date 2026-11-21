@@ -1,16 +1,16 @@
 //! Key-name autocomplete suggestions.
 //!
 //! Suggestions are ranked in memory from discovered project key indexes (never
-//! reading secret values from disk):
+//! reading values from disk):
 //! 1. Keys present in sibling env files of the same project but missing in the
-//!    open file (`.env.example` preferred as origin, with optional example hint).
+//!    open file.
 //! 2. Keys present in other discovered projects.
 //! 3. Common well-known environment variable names.
 
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::discover::{is_example_filename, Project};
+use crate::discover::Project;
 
 const COMMON_KEYS: &[&str] = &[
     "DATABASE_URL",
@@ -69,26 +69,18 @@ pub enum SuggestionSource {
 pub struct KeySuggestion {
     pub key: String,
     pub source: SuggestionSource,
-    /// Human-readable origin label (e.g. `".env.example"`, `"web-portal"`, `"common"`).
-    pub origin: String,
-    /// Optional non-secret value hint from `.env.example` only.
-    pub example_hint: Option<String>,
     pub score: i32,
 }
 
 /// Rank autocomplete suggestions for a key name being added or renamed.
 ///
 /// `existing_keys` are keys already present in the current file (excluded from
-/// results). `example_values` optionally supplies `(key, value)` pairs parsed
-/// from the current project's `.env.example` so picking a suggested example key
-/// can offer its template value as a hint without ever reading secrets from
-/// non-example files.
+/// results). Never reads or returns values.
 pub fn suggest_keys(
     projects: &[Project],
     project_ix: Option<usize>,
     current_file: Option<&Path>,
     existing_keys: &[String],
-    example_values: &[(String, String)],
     query: &str,
     limit: usize,
 ) -> Vec<KeySuggestion> {
@@ -99,44 +91,19 @@ pub fn suggest_keys(
     let query = query.trim();
     let existing: HashSet<&str> = existing_keys.iter().map(String::as_str).collect();
     let mut seen: HashSet<String> = HashSet::new();
-    let mut candidates: Vec<(String, SuggestionSource, String, Option<String>)> = Vec::new();
+    let mut candidates: Vec<(String, SuggestionSource)> = Vec::new();
 
-    let example_hint_for = |key: &str| -> Option<String> {
-        example_values
-            .iter()
-            .rev()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.clone())
-            .filter(|v| !v.is_empty())
-    };
-
-    // Tier 0: sibling files in the same project (prefer `.env.example` first so
-    // its origin label wins when a key appears in multiple siblings).
+    // Tier 0: sibling files in the same project.
     if let Some(project) = project_ix.and_then(|ix| projects.get(ix)) {
-        let mut sibling_files: Vec<_> = project
-            .files
-            .iter()
-            .filter(|file| current_file.is_none_or(|cur| file.path != cur))
-            .collect();
-        sibling_files.sort_by_key(|file| !is_example_filename(&file.name));
-
-        for file in sibling_files {
-            let is_example = is_example_filename(&file.name);
+        for file in &project.files {
+            if current_file.is_some_and(|cur| file.path == cur) {
+                continue;
+            }
             for key in &file.keys {
                 if existing.contains(key.as_str()) || !seen.insert(key.clone()) {
                     continue;
                 }
-                let hint = if is_example {
-                    example_hint_for(key)
-                } else {
-                    None
-                };
-                candidates.push((
-                    key.clone(),
-                    SuggestionSource::Sibling,
-                    file.name.clone(),
-                    hint,
-                ));
+                candidates.push((key.clone(), SuggestionSource::Sibling));
             }
         }
     }
@@ -151,12 +118,7 @@ pub fn suggest_keys(
                 if existing.contains(key.as_str()) || !seen.insert(key.clone()) {
                     continue;
                 }
-                candidates.push((
-                    key.clone(),
-                    SuggestionSource::OtherProject,
-                    project.name.clone(),
-                    None,
-                ));
+                candidates.push((key.clone(), SuggestionSource::OtherProject));
             }
         }
     }
@@ -166,17 +128,12 @@ pub fn suggest_keys(
         if existing.contains(key) || !seen.insert(key.to_string()) {
             continue;
         }
-        candidates.push((
-            key.to_string(),
-            SuggestionSource::Common,
-            "common".to_string(),
-            None,
-        ));
+        candidates.push((key.to_string(), SuggestionSource::Common));
     }
 
     let mut ranked: Vec<KeySuggestion> = candidates
         .into_iter()
-        .filter_map(|(key, source, origin, example_hint)| {
+        .filter_map(|(key, source)| {
             let match_score = if query.is_empty() {
                 0
             } else {
@@ -190,8 +147,6 @@ pub fn suggest_keys(
             Some(KeySuggestion {
                 key,
                 source,
-                origin,
-                example_hint,
                 score: match_score + tier_bonus,
             })
         })
@@ -209,6 +164,19 @@ pub fn suggest_keys(
     }
     ranked.truncate(limit);
     ranked
+}
+
+/// Byte range of the first contiguous case-insensitive match of `query` in `key`,
+/// used to lightly emphasize the matched prefix or substring in the UI.
+pub fn match_span(key: &str, query: &str) -> Option<(usize, usize)> {
+    let query = query.trim();
+    if query.is_empty() || !key.is_ascii() || !query.is_ascii() {
+        return None;
+    }
+    let hay = key.to_ascii_lowercase();
+    let needle = query.to_ascii_lowercase();
+    let start = hay.find(&needle)?;
+    Some((start, start + needle.len()))
 }
 
 fn score_key(key: &str, query: &str) -> Option<i32> {
@@ -323,13 +291,11 @@ mod tests {
     fn empty_query_ranks_sibling_then_other_project_then_common() {
         let projects = sample_projects();
         let existing = vec!["DATABASE_URL".to_string()];
-        let example_vals = vec![("SENTRY_DSN".into(), "https://example@sentry.io/1".into())];
         let results = suggest_keys(
             &projects,
             Some(0),
             Some(Path::new("/work/api/.env.local")),
             &existing,
-            &example_vals,
             "",
             10,
         );
@@ -340,21 +306,12 @@ mod tests {
         assert_eq!(results[0].source, SuggestionSource::Sibling);
         assert_eq!(results[1].source, SuggestionSource::Sibling);
         assert_eq!(results[2].source, SuggestionSource::Sibling);
-        let sentry = results.iter().find(|s| s.key == "SENTRY_DSN").unwrap();
-        assert_eq!(sentry.origin, ".env.example");
-        assert_eq!(
-            sentry.example_hint.as_deref(),
-            Some("https://example@sentry.io/1")
-        );
-        // Non-example sibling never gets an example_hint.
-        let prod_flag = results.iter().find(|s| s.key == "PROD_FLAG").unwrap();
-        assert_eq!(prod_flag.origin, ".env.production");
-        assert_eq!(prod_flag.example_hint, None);
+        assert!(results.iter().any(|s| s.key == "SENTRY_DSN"));
+        assert!(results.iter().any(|s| s.key == "PROD_FLAG"));
 
         // Next 2 are from the other project (worker).
         assert_eq!(results[3].source, SuggestionSource::OtherProject);
         assert_eq!(results[4].source, SuggestionSource::OtherProject);
-        assert_eq!(results[3].origin, "worker");
 
         // Remaining come from common well-known keys.
         assert_eq!(results[5].source, SuggestionSource::Common);
@@ -369,14 +326,15 @@ mod tests {
             Some(0),
             Some(Path::new("/work/api/.env.local")),
             &existing,
-            &[],
             "str",
-            6,
+            5,
         );
         // STRIPE_KEY (Sibling) outranks STRIPE_SECRET_KEY (Common).
         assert_eq!(results[0].key, "STRIPE_KEY");
         assert_eq!(results[0].source, SuggestionSource::Sibling);
         assert!(results.iter().any(|s| s.key == "STRIPE_SECRET_KEY"));
+        assert_eq!(match_span("STRIPE_KEY", "str"), Some((0, 3)));
+        assert_eq!(match_span("MY_STRIPE_KEY", "str"), Some((3, 6)));
 
         // Fuzzy subsequence matches QUEUE_NAME from other project.
         let fuzzy = suggest_keys(
@@ -384,9 +342,8 @@ mod tests {
             Some(0),
             Some(Path::new("/work/api/.env.local")),
             &existing,
-            &[],
             "qnm",
-            6,
+            5,
         );
         assert_eq!(fuzzy[0].key, "QUEUE_NAME");
         assert_eq!(fuzzy[0].source, SuggestionSource::OtherProject);

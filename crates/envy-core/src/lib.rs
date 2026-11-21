@@ -40,4 +40,4 @@ pub use paste::{apply_paste, plan_paste, PasteChange, PastePlan};
 pub use scaffold::from_example;
 pub use search::{search, SearchHit, SearchKind};
 pub use session::{inspect_disk, save_text, DiskNotice, OpenFile};
-pub use suggest::{common_env_keys, suggest_keys, KeySuggestion, SuggestionSource};
+pub use suggest::{common_env_keys, match_span, suggest_keys, KeySuggestion, SuggestionSource};

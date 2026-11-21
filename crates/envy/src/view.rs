@@ -14,12 +14,11 @@ use envy_core::discover::{
 };
 use envy_core::document::{LayoutItem, Node, UnreadableLine};
 use envy_core::paste::{PasteChange, PastePlan};
-use envy_core::scaffold::is_safe_default;
 use envy_core::{
     attach_git_identity, cache_from_projects, diff, fill_key_index, from_example, is_env_key,
-    load_index_cache, plan_paste, projects_from_cache, save_index_cache, save_text, scan_paths,
-    sidebar_rank, suggest_keys, upsert_file, Config, Deeplink, EditorView, EnvDocument, EnvFile,
-    FoundEnv, KeySuggestion, OpenFile, Project, ScanError, SuggestionSource, ThemeSetting,
+    load_index_cache, match_span, plan_paste, projects_from_cache, save_index_cache, save_text,
+    scan_paths, sidebar_rank, suggest_keys, upsert_file, Config, Deeplink, EditorView, EnvDocument,
+    EnvFile, FoundEnv, KeySuggestion, OpenFile, Project, ScanError, ThemeSetting,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -131,8 +130,6 @@ pub struct EnvyApp {
     text_editor_syncing: bool,
     text_editor_needs_sync: bool,
     text_session_before: Option<EnvDocument>,
-    example_hints: Vec<(String, String)>,
-    example_hints_project: Option<PathBuf>,
     diff_open: bool,
     diff_cursor: usize,
     diff_left: Option<usize>,
@@ -251,8 +248,6 @@ impl EnvyApp {
             text_editor_syncing: false,
             text_editor_needs_sync: false,
             text_session_before: None,
-            example_hints: Vec::new(),
-            example_hints_project: None,
             diff_open: false,
             diff_cursor: 0,
             diff_left: None,
@@ -1228,7 +1223,6 @@ impl EnvyApp {
     }
 
     fn load_selected_file(&mut self, cx: &mut Context<Self>) {
-        self.refresh_example_hints(cx);
         let Some(path) = self.current_path() else {
             self.open = None;
             self.text_session_before = None;
@@ -1334,7 +1328,6 @@ impl EnvyApp {
                         self.close_editor();
                         self.text_session_before = None;
                         self.text_editor_needs_sync = true;
-                        self.refresh_example_hints(cx);
                         if self.diff_open {
                             self.load_diff(cx);
                         }
@@ -1697,69 +1690,11 @@ impl EnvyApp {
         cx.notify();
     }
 
-    fn refresh_example_hints(&mut self, cx: &mut Context<Self>) {
-        let Some(project) = self.project_ix.and_then(|ix| self.projects.get(ix)) else {
-            self.example_hints.clear();
-            self.example_hints_project = None;
-            return;
-        };
-        let root = project.root.clone();
-        if self.example_hints_project.as_ref() == Some(&root) {
-            return;
-        }
-        self.example_hints_project = Some(root.clone());
-        self.example_hints.clear();
-        let Some(example_path) = project
-            .files
-            .iter()
-            .find(|file| is_example_filename(&file.name))
-            .map(|file| file.path.clone())
-        else {
-            return;
-        };
-        cx.spawn(async move |this, async_cx| {
-            let hints = async_cx
-                .background_executor()
-                .spawn(async move {
-                    let Ok(raw) = std::fs::read_to_string(&example_path) else {
-                        return Vec::new();
-                    };
-                    let doc = EnvDocument::parse(&raw);
-                    let mut pairs = Vec::new();
-                    let mut seen = HashSet::new();
-                    for (_, entry) in doc.entries() {
-                        if !entry.disabled && seen.insert(entry.key.clone()) {
-                            pairs.push((entry.key.clone(), entry.value.clone()));
-                        }
-                    }
-                    for (_, entry) in doc.entries() {
-                        if entry.disabled && seen.insert(entry.key.clone()) {
-                            pairs.push((entry.key.clone(), entry.value.clone()));
-                        }
-                    }
-                    pairs
-                })
-                .await;
-            let _ = this.update(async_cx, |view, cx| {
-                if view.example_hints_project.as_ref() != Some(&root) {
-                    return;
-                }
-                view.example_hints = hints;
-                if let Some(query) = view
-                    .editor
-                    .as_ref()
-                    .and_then(|editor| editor.key.as_ref())
-                    .map(|input| input.read(cx).value().to_string())
-                {
-                    view.refresh_editor_suggestions(&query);
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
     fn compute_suggestions(&self, query: &str) -> Vec<KeySuggestion> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Vec::new();
+        }
         let Some(open) = &self.open else {
             return Vec::new();
         };
@@ -1775,15 +1710,18 @@ impl EnvyApp {
             .map(|(_, entry)| entry.key.clone())
             .collect();
 
-        suggest_keys(
+        let results = suggest_keys(
             &self.projects,
             self.project_ix,
             Some(open.path.as_path()),
             &current_keys,
-            &self.example_hints,
             query,
-            8,
-        )
+            5,
+        );
+        if results.len() == 1 && results[0].key.eq_ignore_ascii_case(query) {
+            return Vec::new();
+        }
+        results
     }
 
     fn refresh_editor_suggestions(&mut self, query: &str) {
@@ -1820,31 +1758,13 @@ impl EnvyApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some((key, hint, tag, key_input, value_input)) = self.editor.as_ref().and_then(|ed| {
+        let Some((key, tag, key_input)) = self.editor.as_ref().and_then(|ed| {
             let suggestion = ed.suggestions.get(index)?;
-            Some((
-                suggestion.key.clone(),
-                suggestion.example_hint.clone(),
-                ed.kind_tag(),
-                ed.key.clone()?,
-                ed.value.clone(),
-            ))
+            Some((suggestion.key.clone(), ed.kind_tag(), ed.key.clone()?))
         }) else {
             return false;
         };
         key_input.update(cx, |input, cx| input.set_value(key.clone(), window, cx));
-        if matches!(tag, EditTag::New) {
-            if let Some(hint) = hint.filter(|value| !value.is_empty()) {
-                let current_val = value_input.read(cx).value().to_string();
-                if current_val.is_empty() {
-                    if is_safe_default(&hint) {
-                        value_input.update(cx, |input, cx| input.set_value(hint, window, cx));
-                    } else {
-                        value_input.update(cx, |input, cx| input.set_placeholder(hint, window, cx));
-                    }
-                }
-            }
-        }
         if let Some(editor) = self.editor.as_mut() {
             editor.suggestions_open = false;
         }
@@ -2037,6 +1957,18 @@ impl EnvyApp {
     }
 
     fn commit_focused_field(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.key_editor_focused(window, cx) {
+            if let Some(ix) = self
+                .editor
+                .as_ref()
+                .filter(|editor| editor.suggestions_open && !editor.suggestions.is_empty())
+                .map(|editor| editor.suggestion_ix)
+            {
+                if self.accept_suggestion(ix, window, cx) {
+                    return;
+                }
+            }
+        }
         let (tag, key_focused, key_text, value_text) = {
             let Some(editor) = self.editor.as_ref() else {
                 return;
@@ -4943,39 +4875,78 @@ impl EnvyApp {
         if !editor.suggestions_open || editor.suggestions.is_empty() {
             return None;
         }
+        let query = editor
+            .key
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string())
+            .unwrap_or_default();
         let entity = cx.entity();
         let active_ix = editor.suggestion_ix;
 
-        let mut list = v_flex()
-            .ml(px(16.))
-            .mt(px(4.))
-            .mb(px(6.))
-            .w(KEY_COL_W + px(110.))
-            .flex_shrink_0()
-            .rounded(px(8.))
-            .bg(p.bg_surface)
-            .border_1()
-            .border_color(p.border_control)
-            .shadow_md()
-            .overflow_hidden();
-
-        let mut rows = v_flex().p(px(4.)).gap(px(1.));
+        let mut rows = v_flex().p(px(3.)).gap(px(1.));
         for (ix, suggestion) in editor.suggestions.iter().enumerate() {
             let selected = ix == active_ix;
             let pick_entity = entity.clone();
-            let (badge_bg, badge_color) = match suggestion.source {
-                SuggestionSource::Sibling => (p.accent_subtle, p.accent),
-                SuggestionSource::OtherProject => (p.bg_kbd, p.fg_secondary),
-                SuggestionSource::Common => (p.bg_kbd, p.fg_tertiary),
+            let rest_color = if selected {
+                p.fg_secondary
+            } else {
+                p.fg_tertiary
             };
+
+            let key_label = if let Some((start, end)) = match_span(&suggestion.key, &query) {
+                let before = suggestion.key[..start].to_string();
+                let matched = suggestion.key[start..end].to_string();
+                let after = suggestion.key[end..].to_string();
+                h_flex()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .font_family(mono.clone())
+                    .text_size(px(12.))
+                    .line_height(px(16.))
+                    .when(!before.is_empty(), |row| {
+                        row.child(div().text_color(rest_color).child(before))
+                    })
+                    .child(
+                        div()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(p.fg_primary)
+                            .child(matched),
+                    )
+                    .when(!after.is_empty(), |row| {
+                        row.child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_color(rest_color)
+                                .child(after),
+                        )
+                    })
+                    .into_any_element()
+            } else {
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .font_family(mono.clone())
+                    .text_size(px(12.))
+                    .line_height(px(16.))
+                    .truncate()
+                    .text_color(if selected {
+                        p.fg_primary
+                    } else {
+                        p.fg_secondary
+                    })
+                    .child(suggestion.key.clone())
+                    .into_any_element()
+            };
+
             let mut item = h_flex()
                 .id(SharedString::from(format!("key-suggest-{ix}")))
-                .h(px(28.))
+                .h(px(24.))
                 .px(px(8.))
-                .gap(px(8.))
-                .rounded(px(5.))
+                .rounded(px(4.))
                 .items_center()
-                .justify_between()
                 .cursor_pointer()
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                     cx.stop_propagation();
@@ -4983,54 +4954,28 @@ impl EnvyApp {
                         this.accept_suggestion(ix, window, cx);
                     });
                 })
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .font_family(mono.clone())
-                        .text_size(px(12.5))
-                        .line_height(px(16.))
-                        .truncate()
-                        .text_color(if selected {
-                            p.fg_primary
-                        } else {
-                            p.fg_secondary
-                        })
-                        .child(suggestion.key.clone()),
-                )
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .px(px(6.))
-                        .py(px(1.))
-                        .rounded(px(4.))
-                        .bg(badge_bg)
-                        .text_size(px(10.5))
-                        .line_height(px(14.))
-                        .text_color(badge_color)
-                        .child(suggestion.origin.clone()),
-                );
+                .child(key_label);
             if selected {
-                item = item.bg(p.bg_selected_accent);
+                item = item.bg(p.bg_selected_muted);
             } else {
                 item = item.hover(move |style| style.bg(p.bg_hover));
             }
             rows = rows.child(item);
         }
 
-        let footer = h_flex()
-            .px(px(10.))
-            .py(px(5.))
-            .gap(px(10.))
-            .items_center()
+        let list = v_flex()
+            .ml(px(16.))
+            .mt(px(3.))
+            .mb(px(4.))
+            .w(KEY_COL_W - px(12.))
+            .flex_shrink_0()
+            .rounded(px(6.))
             .bg(p.bg_chrome)
-            .border_t_1()
+            .border_1()
             .border_color(p.border_hairline)
-            .child(footer_hint("↑↓", "Select", p, mono.clone()))
-            .child(footer_hint("Tab", "Pick", p, mono.clone()))
-            .child(footer_hint("Esc", "Hide", p, mono));
-
-        list = list.child(rows).child(footer);
+            .shadow_sm()
+            .overflow_hidden()
+            .child(rows);
         Some(list)
     }
 
