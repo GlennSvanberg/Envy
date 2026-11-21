@@ -5,26 +5,26 @@
   <img alt="Envy — a fast, keyboard-driven .env editor" src="assets/icon/envy-readme-header-light.png" width="1280">
 </picture>
 
-Envy is a fast, keyboard-first editor for `.env` files. It edits the files where they already live, and only inside folders you add. Files are grouped by the git repository they belong to.
+Envy edits `.env` files where they already live, inside folders you add. Files are grouped by git repo.
 
-The window is [GPUI](https://github.com/zed-industries/zed) through [gpui-kit](https://github.com/longbridge/gpui-component) 0.10. Parsing, discovery, diff, and file IO live in `envy-core`, so later tools can share one model of a `.env` file.
+The window is [GPUI](https://github.com/zed-industries/zed) through [gpui-kit](https://github.com/longbridge/gpui-component) 0.10. Parsing, discovery, and file IO live in `envy-core`.
 
 ![Files](docs/screenshots/files-dark.png)
 
 ## Features
 
-- Add folders yourself. Envy lists `.env`, `.env.*`, and `*.env` files as it finds them, skips dependency directories, and groups the files by git repo (remote name, otherwise the folder) and shows the branch. The list is remembered, so the next launch shows it at once and then refreshes.
-- Lossless editing. Comments, blank lines, quoting, `export`, and multiline values stay as they were. Only the keys you change are rewritten.
-- Edit in the row. Enter starts an edit, Esc cancels, Enter or Tab commits. New keys, rename, and paste all stay in the table.
-- Undo and redo (`Ctrl+Z`, `Ctrl+Y` or `Ctrl+Shift+Z`) apply to the open buffer. `Ctrl+S` writes the file. Switching files or closing the window also writes unsaved edits.
-- Atomic save. The new text is written to a sibling `*.envy-tmp` file, synced, then renamed over the original. A crash before the rename leaves the `.env` intact. The sibling is deleted if the save fails, and Envy never opens it as an env file.
-- Masked values (one dot per character), per-key reveal, and show-all. Copy clears the clipboard after 30 seconds unless you turn that off.
-- Compare two files you pick. Keys line up in two columns. Each row can copy a value either way, and each side can copy every key it is missing.
-- Paste a block of `KEY=value` lines (the block Vercel's env UI copies). Envy shows a preview; Enter applies it.
-- New `.env.local` from `.env.example`: comments and safe defaults stay, secret values are cleared.
-- Find a project from the field at the top of the sidebar, and find a key from the field above the variable list. `/` or `Ctrl+F` focuses the field for the list you are in. Values are not searchable and are not stored in config or logs.
-- Light and dark, following the system, with an override. Production files (a `prod` or `production` segment in the name) get a thin red tab accent.
-- A single instance. `envy://` links and a second launch are handed to the window that is already open. `Ctrl+Alt+E` raises it (change the chord in settings). Closing the window quits. There is no tray icon.
+- Add folders. Envy lists `.env`, `.env.*`, and `*.env` as it finds them, skips dependency directories, and groups files by git repo. The list is saved, so the next launch shows it and then refreshes.
+- Comments, blank lines, quoting, `export`, and multiline values stay as they were. Only the keys you change are rewritten.
+- Enter edits the value in the row. Esc cancels. Enter or Tab commits.
+- Undo and redo (`Ctrl+Z`, `Ctrl+Y` or `Ctrl+Shift+Z`). `Ctrl+S` writes the file. Switching files or closing the window also writes unsaved edits.
+- Save writes a sibling file, then replaces the original. A crash before the replace leaves the `.env` intact.
+- Values are masked. Reveal one key, or all of them. Copy clears the clipboard after 30 seconds unless you turn that off.
+- Ctrl+click or Shift+click two file tabs to compare them. Keys line up in two columns. Each row can copy a value either way, and each side can copy every missing key. A plain click returns to the file.
+- Paste a block of `KEY=value` lines. Envy shows a preview; Enter applies it.
+- New `.env.local` from `.env.example`. Comments and safe defaults stay. Secret values are cleared.
+- Find a project from the sidebar field, and a key from the field above the list. `/` or `Ctrl+F` focuses the field for the area you are in. Values are not searchable and are not stored.
+- Light and dark, following the system, with an override. The accent is the logo green. A production file name gets a red dot.
+- One window. `envy://` links and a second launch go to the window that is already open. `Ctrl+Alt+E` raises it. Closing the window quits.
 
 ## Keyboard
 
@@ -32,26 +32,26 @@ Press `?` for the same list inside the window.
 
 | Key | Action |
 | --- | --- |
-| `j` `k` or `↑` `↓` | Move in the focused list |
-| `Enter` | Open the project, or edit the value |
-| `←` `→` or `Tab` | Move between the project list and the keys |
-| `h` `l` | Previous / next file |
-| `/` or `Ctrl+F` | Find in the list you are in. `Esc` clears it |
+| `↑` `↓` | Move. Down from a search field enters its list |
+| `Enter` | Open the project, open the tab, or edit the value |
+| `Tab` `Shift+Tab` | Next / previous area: projects, file tabs, keys |
+| `←` | Back to the project list. In the file tabs, the previous tab |
+| `→` | Next area, or the next tab |
+| `Ctrl+Tab` | Next file. `Ctrl+Shift+Tab` previous. `Ctrl+1` through `Ctrl+9` open that file |
+| `/` or `Ctrl+F` | Search the area you are in. `Esc` clears it, then leaves the field |
+| `Shift+Enter` or Ctrl+click | Compare two file tabs. A plain click closes the comparison |
+| `d` | Compare the open file with the example, or the next file. `]` changes the second file |
 | `f` | Pin or unpin the selected project |
-| `Tab` | Commit an edit |
-| `Esc` | Clear the filter, cancel an edit, or close a panel |
 | `c` | Copy the value |
 | `Space` | Show or hide the value |
 | `a` | Show or hide every value |
 | `n` | New key |
 | `F2` | Rename the key |
-| `x` `Delete` `Backspace` | Remove the key (`Ctrl+Z` brings it back) |
+| `x` `Delete` `Backspace` | Remove the key |
 | `Ctrl+Z` | Undo |
 | `Ctrl+Y` or `Ctrl+Shift+Z` | Redo |
 | `Ctrl+S` | Save |
 | `Ctrl+V` | Paste `KEY=value` lines |
-| `d` | Compare two files |
-| `]` | Switch the left file in the comparison |
 | `Ctrl+Shift+N` | New `.env.local` from the example |
 | `Ctrl+O` | Add a folder |
 | `Ctrl+,` | Settings |
@@ -64,7 +64,7 @@ Files, dark. The selected row has copy and reveal icons.
 
 ![Files, dark](docs/screenshots/files-dark.png)
 
-The same file in light, with the diff open. Green is equal, amber differs, blue is only in this file, red is missing here.
+The same file in light, with a comparison open. Green is equal, amber differs, red is only on the right.
 
 ![Files and diff, light](docs/screenshots/files-light.png)
 

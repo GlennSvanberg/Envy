@@ -65,17 +65,24 @@ UI copy speaks to the user about their task, never about the implementation. Do 
 
 ## Design rules
 
+- One accent: the logo green (`#34D399` on a dark theme, `#047857` on a light theme). Selection, the active tab, focus, and search matches use it. Warning and danger stay for status.
+- Never use a thick left-border bar as a selection or callout indicator. A selected row is a quiet fill and accent text. A focused area is a thin outline.
+- UI copy talks about the task. No implementation talk, and no decorative filler.
+- No command palette. Search is the sidebar field and the field above the keys.
+
+## Constraints
+
 - Icons first. A button that has a Lucide icon uses it (`gpui_kit::assets::IconName`) with a hover tooltip. Text labels are for rows, empty states, and settings that are not a single action. The icon font comes from `gpui_kit::assets::AllAssets` in `main.rs`. The default asset subset does not contain the icons we use.
-- Never store values. Config, logs, and the two filter fields may hold folder paths, theme, the hotkey, project names, and key names. They must not hold secret values. Do not log `Entry::value`. There is no command palette. Projects are filtered in the sidebar and keys are filtered above the variable list, by name only.
+- Never store values. Config, logs, and the two filter fields may hold folder paths, theme, the hotkey, project names, and key names. They must not hold secret values. Do not log `Entry::value`. Projects are filtered in the sidebar and keys are filtered above the variable list, by name only.
 - The atomic-save sibling (`filename.envy-tmp`, next to the target) exists only during `write_atomic`. Delete it on failure. Do not treat it as a backup, and do not discover it as an env file (`is_env_filename` rejects the suffix). On Windows the replace uses `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`, because `std::fs::rename` does not replace an existing file there.
 - Preserve comments and order. Untouched entries keep their raw line. `set_value` rewrites only the entries it changes. `serialize` is the way to write a document; do not add a `Display` that calls it (that recurses).
 - Edits are in memory until save. `OpenFile` is dirty when `serialize()` differs from `clean`. Undo and redo do not touch disk. Save on `Ctrl+S`, on switching files, and on window close.
-- Comparing two files is explicit: a left file and a right file, defaulting to `.env.example` and the file that is open. Each row can copy a value either direction. "Copy missing" copies keys that exist on only one side. Copying into the open file marks it dirty. Copying into the other file saves that file. Both are on purpose; the user picks the direction.
-- Favorites and recently opened projects are stored as paths on `Config` (`favorites`, `recent_projects`). They never store values. The sidebar order is favorites, then recent, then name.
+- Two files are compared by selecting two tabs (Ctrl+click, Shift+click, or Shift+Enter). The first tab is the left column, the second is the right. `d` opens that view with the example (or the next file) beside the open file. Each row can copy a value either direction. "Copy missing" copies keys that exist on only one side. Copying into the open file marks it dirty. Copying into the other file saves that file.
+- Favorites and recently opened projects are stored as paths on `Config` (`favorites`, `recent_projects`). They never store values. The sidebar order is favorites, then recent, then name. Recent order is applied at launch. Moving through the list does not reorder it. Pinning does.
 - `cmd` in a GPUI keystroke is the Super key. Bind `ctrl-` explicitly. `KeyBinding::new` does not resolve `secondary-`.
-- Tab commits an inline edit. The root captures Tab while an editor is open so the input's indent binding does not take it.
-- Production files get their red accent from a separate 2px bar. One `border_color` paints every edge, so it cannot also be the selection underline.
-- Light and dark both have to stay readable. Prefer theme tokens (`background`, `foreground`, `muted_foreground`, `border`, `sidebar`, `danger`, `warning`, `success`, `info`) over hard-coded colors. Rows are short and corners are rounded; the window should feel closer to Raycast or Linear than to a form.
+- Tab commits an inline edit. The root captures Tab while an editor is open so the input's indent binding does not take it. Otherwise Tab and Shift+Tab move between the project list, the file tabs, and the keys.
+- A production file is marked with a small red dot, not a bar.
+- Light and dark both have to stay readable. Prefer theme tokens over extra hard-coded colors. Rows keep a fixed height.
 
 ## Config
 
