@@ -37,9 +37,11 @@ pub use cells::{
     TAB_PAD_X_PX, TAB_TEXT_PX, VALUE_PAD_RIGHT_PX,
 };
 pub use chrome::{
-    centered_search_frame, key_search_frame, project_search_frame, search_field_inset, SearchFrame,
-    PROJECT_HEADER_H_PX, SEARCH_BAND_BORDER_PX, SEARCH_BAND_H_PX, SEARCH_FIELD_H_PX,
-    SEARCH_LINE_PX, SEARCH_TEXT_PX, TAB_BAR_H_PX, TOOLBAR_H_PX,
+    centered_search_frame, fit_toolbar, key_search_frame, project_search_frame, search_field_inset,
+    SearchFrame, ToolbarFit, KEY_SEARCH_MIN_PX, KEY_SEARCH_PREFERRED_PX, PROJECT_HEADER_H_PX,
+    SEARCH_BAND_BORDER_PX, SEARCH_BAND_H_PX, SEARCH_FIELD_H_PX, SEARCH_LINE_PX, SEARCH_TEXT_PX,
+    TAB_BAR_H_PX, TOOLBAR_H_PX, TOOLBAR_NOTICE_MIN_PX, TOOLBAR_NOTICE_SHRINK,
+    TOOLBAR_SEARCH_SHRINK,
 };
 pub use columns::{
     clamp_key_column_px, clamp_sidebar_px, fitted_key_column_px, KEY_COLUMN_MAX_PX,

@@ -162,12 +162,12 @@ Two font families only:
   - *Edit mode (table):*
     - Key filter `Input` (`w(220 px)`, `h(28 px)`, same top inset as Find a project, `Search` icon prefix, `cleanable(true)`, placeholder `"Find a key"`). Typing only filters the list and marks the first match; the caret stays in the field. Down moves into the list. Enter edits the marked key. The focused field uses a `1 px` accent border.
     - Key count (`12 px`, `fg.tertiary`): `"6 keys"` (or `"2 of 6"` while filtering).
-    - Missing-keys drift pill (shown only when `missing.len() > 0`): calm interactive amber pill (`bg: status.warning_bg`, `border: 1 px status.warning_border`, `text: status.warning`, `h(24 px)`, `px(8 px)`, `rounded(999 px)`, `12 px` icon + `"2 missing vs .env.example"`). Clicking opens Compare with `.env.example`.
+    - Missing-keys notice (shown only when `missing.len() > 0`): a compact pill in the same row, directly after the key count, using the logo accent (`bg: accent.subtle`, `border: 1 px accent.ring`, `text: accent`, `h(24 px)`, `px(8 px)`, `rounded(999 px)`, `12 px` `Info` icon + `"2 missing vs .env.example"`). It is a flex item, never absolutely positioned. The icon buttons on the right never shrink or get covered. On a narrow window the notice ellipsizes first (tooltip is the full sentence) and Find a key shrinks only after that, down to `120 px`. Clicking opens Compare with `.env.example`.
   - *Edit mode (plain text):*
-    - Quiet notice pill (`bg.kbd`, `1 px border.hairline`, `Eye` icon + `"Plain text · values visible"`) and line count.
+    - Quiet notice pill (`bg.kbd`, `1 px border.hairline`, `Eye` icon + `"Plain text · values visible"`) and line count. The notice ellipsizes before the line count or the icon buttons give up space. The tooltip is the full sentence.
   - *Compare mode:*
     - Close compare icon button (`X`, tooltip `"Close compare · Esc"`).
-    - Neutral summary chips (`bg.kbd`, `1 px border.hairline`, `fg.secondary` text) each pairing a small `11 px` colored Lucide glyph (`EqualNot`, `Plus`, `Minus`, or `Check`) with the count (`2 differ`, `3 left only`, `6 right only`, or `Files match`).
+    - Neutral summary chips (`bg.kbd`, `1 px border.hairline`, `fg.secondary` text) each pairing a small `12 px` colored Lucide glyph (`EqualNot`, `Plus`, `Minus`, `ToggleLeft`, or `Check`) with the count (`2 differ`, `3 left only`, `6 right only`, `4 off`, or `Files match`). The chips share the notice's flex rule: they ellipsize, the tooltip is the full count, and the close, cycle, and right-hand icon buttons stay fully visible.
     - Cycle second file icon button (`ArrowLeftRight`, tooltip `"Compare another file · ]"`), shown when project has ≥ 3 files.
 - **Right region (`gap(4 px)` within groups, `1 px × 16 px` `border.hairline` dividers with `mx(4 px)` between groups):**
   - *Edit group:*

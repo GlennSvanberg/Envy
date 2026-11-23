@@ -22,6 +22,58 @@ pub const SEARCH_BAND_BORDER_PX: f32 = 1.;
 pub const SEARCH_TEXT_PX: f32 = 13.;
 /// Shared line box. The paint uses the field height, so this stays in step.
 pub const SEARCH_LINE_PX: f32 = 16.;
+/// Find a key prefers this width and only shrinks after the notice has.
+pub const KEY_SEARCH_PREFERRED_PX: f32 = 220.;
+/// Narrowest Find a key, once the notice is down to its icon.
+pub const KEY_SEARCH_MIN_PX: f32 = 120.;
+/// Icon and padding left when a notice label has ellipsized away.
+pub const TOOLBAR_NOTICE_MIN_PX: f32 = 32.;
+/// The notice gives up width before the search field does.
+pub const TOOLBAR_NOTICE_SHRINK: f32 = 100.;
+/// The search field shrinks only after the notice is at its minimum.
+pub const TOOLBAR_SEARCH_SHRINK: f32 = 1.;
+
+/// Widths for the search field, the notice, and the icon buttons.
+///
+/// `available` is the space for those three plus the key count, after the
+/// toolbar's padding and the gaps between them. Buttons stay at `buttons`.
+/// A long notice ellipsizes before the search field moves off its preferred
+/// width.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ToolbarFit {
+    pub search: f32,
+    pub notice: f32,
+    pub buttons: f32,
+}
+
+pub fn fit_toolbar(
+    available: f32,
+    buttons: f32,
+    search_preferred: f32,
+    search_min: f32,
+    count: f32,
+    notice: f32,
+    notice_min: f32,
+) -> ToolbarFit {
+    let buttons = buttons.max(0.);
+    let search_preferred = search_preferred.max(0.);
+    let search_min = search_min.clamp(0., search_preferred);
+    let notice = notice.max(0.);
+    let notice_min = notice_min.clamp(0., notice);
+    let mut search = search_preferred;
+    let mut notice_w = notice;
+    let mut deficit = (buttons + count.max(0.) + search + notice_w - available).max(0.);
+    let from_notice = deficit.min((notice_w - notice_min).max(0.));
+    notice_w -= from_notice;
+    deficit -= from_notice;
+    let from_search = deficit.min((search - search_min).max(0.));
+    search -= from_search;
+    ToolbarFit {
+        search,
+        notice: notice_w,
+        buttons,
+    }
+}
 
 /// Top, height, and text center of one search field, measured from the
 /// bottom of the title bar.
@@ -89,5 +141,76 @@ mod tests {
         assert_eq!(inset, 5.);
         assert_eq!(project.top, PROJECT_HEADER_H_PX + inset);
         assert_eq!(project.baseline, project.top + project.height / 2.);
+    }
+
+    #[test]
+    fn buttons_keep_their_width_and_the_notice_truncates_first() {
+        let buttons = 280.;
+        let count = 36.;
+        let notice = 180.;
+        let wide = fit_toolbar(
+            800.,
+            buttons,
+            KEY_SEARCH_PREFERRED_PX,
+            KEY_SEARCH_MIN_PX,
+            count,
+            notice,
+            TOOLBAR_NOTICE_MIN_PX,
+        );
+        assert_eq!(wide.buttons, buttons);
+        assert_eq!(wide.search, KEY_SEARCH_PREFERRED_PX);
+        assert_eq!(wide.notice, notice);
+
+        // 220 + 36 + 180 + 280 = 716. A 600px row takes the extra 116 from the notice.
+        let medium = fit_toolbar(
+            600.,
+            buttons,
+            KEY_SEARCH_PREFERRED_PX,
+            KEY_SEARCH_MIN_PX,
+            count,
+            notice,
+            TOOLBAR_NOTICE_MIN_PX,
+        );
+        assert_eq!(medium.buttons, buttons);
+        assert_eq!(medium.search, KEY_SEARCH_PREFERRED_PX);
+        assert_eq!(medium.notice, notice - 116.);
+
+        let narrow = fit_toolbar(
+            400.,
+            buttons,
+            KEY_SEARCH_PREFERRED_PX,
+            KEY_SEARCH_MIN_PX,
+            count,
+            notice,
+            TOOLBAR_NOTICE_MIN_PX,
+        );
+        assert_eq!(narrow.buttons, buttons);
+        assert_eq!(narrow.notice, TOOLBAR_NOTICE_MIN_PX);
+        assert_eq!(narrow.search, KEY_SEARCH_MIN_PX);
+
+        let compare_chips = fit_toolbar(
+            560.,
+            buttons,
+            KEY_SEARCH_PREFERRED_PX,
+            KEY_SEARCH_MIN_PX,
+            0.,
+            420.,
+            TOOLBAR_NOTICE_MIN_PX,
+        );
+        assert_eq!(compare_chips.buttons, buttons);
+        assert_eq!(compare_chips.notice, 60.);
+        assert_eq!(compare_chips.search, KEY_SEARCH_PREFERRED_PX);
+
+        let clear = fit_toolbar(
+            500.,
+            buttons,
+            KEY_SEARCH_PREFERRED_PX,
+            KEY_SEARCH_MIN_PX,
+            count,
+            0.,
+            0.,
+        );
+        assert_eq!(clear.notice, 0.);
+        assert_eq!(clear.buttons, buttons);
     }
 }

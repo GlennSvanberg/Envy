@@ -26,9 +26,10 @@ use envy_core::{
     Deeplink, EditCell, EditorView, EnterEffect, EnvDocument, EnvFile, EnvFileNameError, FoundEnv,
     KeySuggestion, OpenFile, PathStyle, Project, RowClick, RowTarget, ScanError, ThemeSetting,
     KEY_CELL_GAP_PX, KEY_CELL_PAD_RIGHT_PX, KEY_LINE_PX, KEY_RELATED_ICON_PX, KEY_RELATED_PAD_PX,
-    KEY_TEXT_PX, KEY_TOGGLE_W_PX, SEARCH_BAND_BORDER_PX, SEARCH_BAND_H_PX, SEARCH_FIELD_H_PX,
-    SEARCH_LINE_PX, SEARCH_TEXT_PX, TAB_DOT_PX, TAB_GAP_PX, TAB_H_PX, TAB_LINE_PX, TAB_MENU_LEN,
-    TAB_PAD_X_PX, TAB_TEXT_PX, VALUE_PAD_RIGHT_PX,
+    KEY_SEARCH_MIN_PX, KEY_SEARCH_PREFERRED_PX, KEY_TEXT_PX, KEY_TOGGLE_W_PX,
+    SEARCH_BAND_BORDER_PX, SEARCH_BAND_H_PX, SEARCH_FIELD_H_PX, SEARCH_LINE_PX, SEARCH_TEXT_PX,
+    TAB_DOT_PX, TAB_GAP_PX, TAB_H_PX, TAB_LINE_PX, TAB_MENU_LEN, TAB_PAD_X_PX, TAB_TEXT_PX,
+    TOOLBAR_NOTICE_MIN_PX, TOOLBAR_NOTICE_SHRINK, TOOLBAR_SEARCH_SHRINK, VALUE_PAD_RIGHT_PX,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -5097,26 +5098,33 @@ impl EnvyApp {
         let file_count = self.file_count();
 
         let left_side = if diff_open {
-            let mut left = h_flex().items_center().gap(px(8.)).flex_1().min_w(px(0.));
+            let mut left = h_flex()
+                .items_center()
+                .gap(px(8.))
+                .flex_1()
+                .min_w(px(0.))
+                .overflow_hidden();
             left = left.child(
-                toolbar_icon_button(
-                    "tb-diff-close",
-                    IconName::X,
-                    "Close compare · Esc",
-                    false,
-                    false,
-                    p,
-                )
-                .on_click({
-                    let entity = entity.clone();
-                    move |_, window, cx| {
-                        entity.update(cx, |this, cx| {
-                            this.clear_compare();
-                            this.focus_self(window, cx);
-                            cx.notify();
-                        });
-                    }
-                }),
+                div().flex_shrink_0().child(
+                    toolbar_icon_button(
+                        "tb-diff-close",
+                        IconName::X,
+                        "Close compare · Esc",
+                        false,
+                        false,
+                        p,
+                    )
+                    .on_click({
+                        let entity = entity.clone();
+                        move |_, window, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.clear_compare();
+                                this.focus_self(window, cx);
+                                cx.notify();
+                            });
+                        }
+                    }),
+                ),
             );
             if let Some(report) = &self.diff_report {
                 let mut different = 0usize;
@@ -5134,6 +5142,7 @@ impl EnvyApp {
                 }
                 if different == 0 && only_left == 0 && only_right == 0 && disabled == 0 {
                     left = left.child(neutral_summary_chip(
+                        "diff-match",
                         IconName::Check,
                         p.accent,
                         "Files match".into(),
@@ -5142,6 +5151,7 @@ impl EnvyApp {
                 } else {
                     if different > 0 {
                         left = left.child(neutral_summary_chip(
+                            "diff-differ",
                             IconName::EqualNot,
                             p.warning,
                             format!("{different} differ"),
@@ -5150,6 +5160,7 @@ impl EnvyApp {
                     }
                     if only_left > 0 {
                         left = left.child(neutral_summary_chip(
+                            "diff-left",
                             IconName::Plus,
                             p.accent,
                             format!("{only_left} left only"),
@@ -5158,6 +5169,7 @@ impl EnvyApp {
                     }
                     if only_right > 0 {
                         left = left.child(neutral_summary_chip(
+                            "diff-right",
                             IconName::Minus,
                             p.danger,
                             format!("{only_right} right only"),
@@ -5166,6 +5178,7 @@ impl EnvyApp {
                     }
                     if disabled > 0 {
                         left = left.child(neutral_summary_chip(
+                            "diff-off",
                             IconName::ToggleLeft,
                             p.fg_tertiary,
                             format!("{disabled} off"),
@@ -5176,21 +5189,23 @@ impl EnvyApp {
             }
             if file_count >= 3 {
                 left = left.child(
-                    toolbar_icon_button(
-                        "tb-diff-cycle",
-                        IconName::ArrowLeftRight,
-                        "Compare another file",
-                        false,
-                        false,
-                        p,
-                    )
-                    .tooltip_with_action("Compare another file", &CycleDiff, Some("Envy"))
-                    .on_click({
-                        let entity = entity.clone();
-                        move |_, _, cx| {
-                            entity.update(cx, |this, cx| this.cycle_diff(cx));
-                        }
-                    }),
+                    div().flex_shrink_0().child(
+                        toolbar_icon_button(
+                            "tb-diff-cycle",
+                            IconName::ArrowLeftRight,
+                            "Compare another file",
+                            false,
+                            false,
+                            p,
+                        )
+                        .tooltip_with_action("Compare another file", &CycleDiff, Some("Envy"))
+                        .on_click({
+                            let entity = entity.clone();
+                            move |_, _, cx| {
+                                entity.update(cx, |this, cx| this.cycle_diff(cx));
+                            }
+                        }),
+                    ),
                 );
             }
             left
@@ -5210,28 +5225,19 @@ impl EnvyApp {
                 .gap(px(8.))
                 .flex_1()
                 .min_w(px(0.))
-                .child(
-                    h_flex()
-                        .h(px(24.))
-                        .px(px(8.))
-                        .gap(px(5.))
-                        .items_center()
-                        .rounded(px(999.))
-                        .bg(p.bg_kbd)
-                        .border_1()
-                        .border_color(p.border_hairline)
-                        .text_size(px(11.5))
-                        .line_height(px(15.))
-                        .text_color(p.fg_secondary)
-                        .child(
-                            Icon::new(IconName::Eye)
-                                .size(px(12.))
-                                .text_color(p.fg_tertiary),
-                        )
-                        .child("Plain text · values visible"),
-                )
+                .overflow_hidden()
+                .child(toolbar_chip(
+                    "plain-text-notice",
+                    IconName::Eye,
+                    p.fg_tertiary,
+                    "Plain text · values visible".into(),
+                    p.bg_kbd,
+                    p.border_hairline,
+                    p.fg_secondary,
+                ))
                 .child(
                     div()
+                        .flex_shrink_0()
                         .text_size(px(12.))
                         .line_height(px(16.))
                         .text_color(p.fg_tertiary)
@@ -5254,15 +5260,23 @@ impl EnvyApp {
                 .gap(px(8.))
                 .flex_1()
                 .min_w(px(0.))
-                .child(div().w(px(220.)).flex_shrink_0().child(search_field(
-                    &self.key_filter,
-                    "clear-key-filter",
-                    p,
-                    window,
-                    cx,
-                )))
+                .overflow_hidden()
                 .child(
                     div()
+                        .w(px(KEY_SEARCH_PREFERRED_PX))
+                        .min_w(px(KEY_SEARCH_MIN_PX))
+                        .flex_shrink(TOOLBAR_SEARCH_SHRINK)
+                        .child(search_field(
+                            &self.key_filter,
+                            "clear-key-filter",
+                            p,
+                            window,
+                            cx,
+                        )),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
                         .text_size(px(12.))
                         .line_height(px(16.))
                         .text_color(p.fg_tertiary)
@@ -5272,33 +5286,22 @@ impl EnvyApp {
 
             if missing_count > 0 {
                 let compare_entity = entity.clone();
+                let label = format!("{missing_count} missing vs .env.example");
                 left = left.child(
-                    h_flex()
-                        .id("missing-vs-example-pill")
-                        .h(px(24.))
-                        .px(px(8.))
-                        .gap(px(5.))
-                        .items_center()
-                        .rounded(px(999.))
-                        .bg(p.warning_bg)
-                        .border_1()
-                        .border_color(p.warning_border)
-                        .text_size(px(11.5))
-                        .line_height(px(15.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(p.warning)
-                        .cursor_pointer()
-                        .hover(move |style| style.bg(p.warning.opacity(0.16)))
-                        .tooltip(hover_tip("Compare with .env.example"))
-                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                            compare_entity.update(cx, |this, cx| this.compare_with_example(cx));
-                        })
-                        .child(
-                            Icon::new(IconName::Info)
-                                .size(px(12.))
-                                .text_color(p.warning),
-                        )
-                        .child(format!("{missing_count} missing vs .env.example")),
+                    toolbar_chip(
+                        "missing-vs-example-pill",
+                        IconName::Info,
+                        p.accent,
+                        label,
+                        p.accent_subtle,
+                        p.accent_ring,
+                        p.accent,
+                    )
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(p.accent.opacity(0.18)))
+                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                        compare_entity.update(cx, |this, cx| this.compare_with_example(cx));
+                    }),
                 );
             }
 
@@ -5500,6 +5503,7 @@ impl EnvyApp {
             .gap(px(12.))
             .items_start()
             .justify_between()
+            .overflow_hidden()
             .bg(p.bg_canvas)
             .border_b_1()
             .border_color(p.border_hairline)
@@ -6663,36 +6667,42 @@ impl EnvyApp {
                     .gap(px(8.))
                     .child(
                         h_flex()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .overflow_hidden()
                             .items_center()
                             .gap(px(6.))
-                            .min_w(px(0.))
                             .child(side_badge("L", p))
                             .child(
                                 h_flex()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .overflow_hidden()
                                     .font_family(mono.clone())
                                     .text_size(px(12.))
                                     .line_height(px(16.))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(p.fg_primary)
-                                    .min_w(px(0.))
                                     .child(file_title(&left_name, &left_suffix, p)),
                             ),
                     )
                     .when(right_only_count > 0, |bar| {
                         bar.child(
-                            Button::new("copy-missing-to-left")
-                                .outline()
-                                .xsmall()
-                                .icon(IconName::ArrowLeft)
-                                .label("Copy missing")
-                                .tooltip(format!(
-                                    "Copy {right_only_count} missing into {left_label}"
-                                ))
-                                .on_click(move |_, _, cx| {
-                                    missing_left_entity.update(cx, |this, cx| {
-                                        this.copy_missing(DiffSide::Right, cx);
-                                    });
-                                }),
+                            div().flex_shrink_0().child(
+                                Button::new("copy-missing-to-left")
+                                    .outline()
+                                    .xsmall()
+                                    .icon(IconName::ArrowLeft)
+                                    .label("Copy missing")
+                                    .tooltip(format!(
+                                        "Copy {right_only_count} missing into {left_label}"
+                                    ))
+                                    .on_click(move |_, _, cx| {
+                                        missing_left_entity.update(cx, |this, cx| {
+                                            this.copy_missing(DiffSide::Right, cx);
+                                        });
+                                    }),
+                            ),
                         )
                     }),
             )
@@ -6719,36 +6729,42 @@ impl EnvyApp {
                     .gap(px(8.))
                     .child(
                         h_flex()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .overflow_hidden()
                             .items_center()
                             .gap(px(6.))
-                            .min_w(px(0.))
                             .child(side_badge("R", p))
                             .child(
                                 h_flex()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .overflow_hidden()
                                     .font_family(mono.clone())
                                     .text_size(px(12.))
                                     .line_height(px(16.))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(p.fg_primary)
-                                    .min_w(px(0.))
                                     .child(file_title(&right_name, &right_suffix, p)),
                             ),
                     )
                     .when(left_only_count > 0, |bar| {
                         bar.child(
-                            Button::new("copy-missing-to-right")
-                                .outline()
-                                .xsmall()
-                                .icon(IconName::ArrowRight)
-                                .label("Copy missing")
-                                .tooltip(format!(
-                                    "Copy {left_only_count} missing into {right_label}"
-                                ))
-                                .on_click(move |_, _, cx| {
-                                    missing_right_entity.update(cx, |this, cx| {
-                                        this.copy_missing(DiffSide::Left, cx);
-                                    });
-                                }),
+                            div().flex_shrink_0().child(
+                                Button::new("copy-missing-to-right")
+                                    .outline()
+                                    .xsmall()
+                                    .icon(IconName::ArrowRight)
+                                    .label("Copy missing")
+                                    .tooltip(format!(
+                                        "Copy {left_only_count} missing into {right_label}"
+                                    ))
+                                    .on_click(move |_, _, cx| {
+                                        missing_right_entity.update(cx, |this, cx| {
+                                            this.copy_missing(DiffSide::Left, cx);
+                                        });
+                                    }),
+                            ),
                         )
                     }),
             );
@@ -8382,26 +8398,58 @@ fn off_badge(p: Palette) -> gpui_kit::Div {
 }
 
 fn neutral_summary_chip(
+    id: &'static str,
     icon: IconName,
     icon_color: gpui_kit::Hsla,
     text: String,
     p: Palette,
-) -> gpui_kit::Div {
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    toolbar_chip(
+        id,
+        icon,
+        icon_color,
+        text,
+        p.bg_kbd,
+        p.border_hairline,
+        p.fg_secondary,
+    )
+}
+
+/// A toolbar notice that keeps its own box. The label ellipsizes, and the
+/// tooltip is the full sentence. Icon buttons beside it do not shrink.
+fn toolbar_chip(
+    id: &'static str,
+    icon: IconName,
+    icon_color: gpui_kit::Hsla,
+    label: String,
+    bg: gpui_kit::Hsla,
+    border: gpui_kit::Hsla,
+    text: gpui_kit::Hsla,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
     h_flex()
-        .h(px(22.))
+        .id(id)
+        .h(px(24.))
+        .min_w(px(TOOLBAR_NOTICE_MIN_PX))
+        .flex_shrink(TOOLBAR_NOTICE_SHRINK)
+        .overflow_hidden()
         .px(px(8.))
         .gap(px(5.))
         .items_center()
         .rounded(px(999.))
-        .bg(p.bg_kbd)
+        .bg(bg)
         .border_1()
-        .border_color(p.border_hairline)
-        .text_size(px(11.))
-        .line_height(px(14.))
+        .border_color(border)
+        .text_size(px(12.))
+        .line_height(px(16.))
         .font_weight(FontWeight::MEDIUM)
-        .text_color(p.fg_secondary)
-        .child(Icon::new(icon).size(px(11.)).text_color(icon_color))
-        .child(text)
+        .text_color(text)
+        .tooltip(hover_tip(label.clone()))
+        .child(
+            div()
+                .flex_shrink_0()
+                .child(Icon::new(icon).size(px(12.)).text_color(icon_color)),
+        )
+        .child(div().min_w(px(0.)).truncate().child(label))
 }
 
 fn kbd_chip(keys: &str, p: Palette, mono: SharedString) -> gpui_kit::Div {
@@ -8567,7 +8615,7 @@ fn file_title(name: &str, suffix: &str, p: Palette) -> gpui_kit::Div {
         .gap(px(6.))
         .items_center()
         .min_w(px(0.))
-        .child(div().child(name.to_string()));
+        .child(div().min_w(px(0.)).truncate().child(name.to_string()));
     if !suffix.is_empty() {
         title = title.child(
             div()
