@@ -23,7 +23,7 @@ The window is [GPUI](https://github.com/zed-industries/zed) through [gpui-kit](h
 - Paste a block of `KEY=value` lines. Envy shows a preview; Enter applies it.
 - New file (`+` or `Ctrl+Shift+N`). The name starts as `.env`, or the next free name, and you can change it before Enter. Start empty, or copy keys and comments from another env file in the project. `.env.example` keeps its values. Other files copy keys only unless you ask for the values too.
 - Find a project from the sidebar field, and a key from the field above the list. `/` or `Ctrl+F` focuses the field for the area you are in. Values are not searchable and are not stored.
-- Light and dark, following the system, with an override. The accent is the logo green. A production file name gets a red dot.
+- Light and dark, following the system, with an override. The accent is the logo red. A production file name gets an amber dot.
 - One window. `envy://` links and a second launch go to the window that is already open. `Ctrl+Alt+E` raises it. Closing the window quits.
 
 ## Keyboard
@@ -65,7 +65,7 @@ Files, dark. The selected row has copy and reveal icons.
 
 ![Files, dark](docs/screenshots/files-dark.png)
 
-The same file in light, and a two-column comparison in dark. Equal rows stay clear, amber differs, green is left only, red is right only.
+The same file in light, and a two-column comparison in dark. Equal rows stay clear, amber differs, red is left only, amber is right only.
 
 ![Files, light](docs/screenshots/files-light.png)
 

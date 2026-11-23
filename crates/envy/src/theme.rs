@@ -1,6 +1,6 @@
 //! Design tokens for Envy, implementing `docs/design.md`.
 //!
-//! One brand accent (the logo green), clear chrome/canvas surface separation,
+//! One brand accent (the logo red), clear chrome/canvas surface separation,
 //! and explicit light and dark values for every token.
 
 use envy_core::{PROJECT_HEADER_H_PX, TAB_BAR_H_PX, TOOLBAR_H_PX};
@@ -68,9 +68,8 @@ pub struct Palette {
 impl Palette {
     pub fn for_mode(dark: bool) -> Self {
         if dark {
-            let accent: Hsla = rgb(0x34D399).into();
+            let accent: Hsla = rgb(0xE5484D).into();
             let warning: Hsla = rgb(0xF59E0B).into();
-            let danger_base: Hsla = rgb(0xEF4444).into();
             Self {
                 bg_canvas: rgb(0x111214).into(),
                 bg_chrome: rgb(0x16171A).into(),
@@ -89,28 +88,27 @@ impl Palette {
                 fg_tertiary: rgb(0x7B8394).into(),
 
                 accent,
-                accent_hover: rgb(0x4ADEA8).into(),
-                accent_fg: rgb(0x06281E).into(),
+                accent_hover: rgb(0xF16A6E).into(),
+                accent_fg: rgb(0x1C0A0B).into(),
                 accent_subtle: accent.opacity(0.11),
                 accent_ring: accent.opacity(0.26),
 
-                prod_dot: rgb(0xE5484D).into(),
+                prod_dot: warning,
                 warning,
                 warning_dot: warning,
                 warning_bg: warning.opacity(0.09),
                 warning_border: warning.opacity(0.22),
-                danger: rgb(0xF87171).into(),
-                danger_bg: danger_base.opacity(0.10),
-                danger_border: danger_base.opacity(0.24),
+                danger: accent,
+                danger_bg: accent.opacity(0.10),
+                danger_border: accent.opacity(0.24),
 
                 diff_different_bg: warning.opacity(0.045),
                 diff_only_left_bg: accent.opacity(0.035),
-                diff_only_right_bg: danger_base.opacity(0.035),
+                diff_only_right_bg: warning.opacity(0.035),
             }
         } else {
-            let accent: Hsla = rgb(0x047857).into();
+            let accent: Hsla = rgb(0xCE2C31).into();
             let warning_dot: Hsla = rgb(0xD97706).into();
-            let danger: Hsla = rgb(0xDC2626).into();
             Self {
                 bg_canvas: rgb(0xFFFFFF).into(),
                 bg_chrome: rgb(0xF6F7F9).into(),
@@ -129,23 +127,23 @@ impl Palette {
                 fg_tertiary: rgb(0x687080).into(),
 
                 accent,
-                accent_hover: rgb(0x065F46).into(),
+                accent_hover: rgb(0xA61B22).into(),
                 accent_fg: rgb(0xFFFFFF).into(),
                 accent_subtle: accent.opacity(0.09),
                 accent_ring: accent.opacity(0.28),
 
-                prod_dot: danger,
+                prod_dot: warning_dot,
                 warning: rgb(0xB45309).into(),
                 warning_dot,
                 warning_bg: warning_dot.opacity(0.09),
                 warning_border: warning_dot.opacity(0.22),
-                danger,
-                danger_bg: danger.opacity(0.08),
-                danger_border: danger.opacity(0.22),
+                danger: accent,
+                danger_bg: accent.opacity(0.08),
+                danger_border: accent.opacity(0.22),
 
                 diff_different_bg: warning_dot.opacity(0.05),
                 diff_only_left_bg: accent.opacity(0.035),
-                diff_only_right_bg: danger.opacity(0.035),
+                diff_only_right_bg: warning_dot.opacity(0.035),
             }
         }
     }
@@ -222,5 +220,19 @@ mod tests {
         assert_eq!(TOOLBAR_H, px(TOOLBAR_H_PX));
         assert_eq!(px(SEARCH_BAND_H_PX), TOOLBAR_H);
         assert_eq!(project_search_frame(), key_search_frame());
+    }
+
+    #[test]
+    fn accent_is_the_logo_red_and_status_stays_amber() {
+        let dark = Palette::for_mode(true);
+        let light = Palette::for_mode(false);
+        assert_eq!(dark.accent, rgb(0xE5484D).into());
+        assert_eq!(light.accent, rgb(0xCE2C31).into());
+        assert_eq!(dark.danger, dark.accent);
+        assert_eq!(light.danger, light.accent);
+        assert_ne!(dark.warning, dark.accent);
+        assert_ne!(light.warning, light.accent);
+        assert_eq!(dark.prod_dot, dark.warning);
+        assert_eq!(light.prod_dot, light.warning_dot);
     }
 }

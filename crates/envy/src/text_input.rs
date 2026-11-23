@@ -146,7 +146,7 @@ impl TextInput {
             focus_handle: cx.focus_handle(),
             field: TextField::new(),
             placeholder: placeholder.into(),
-            accent: rgb(0x34D399).into(),
+            accent: rgb(0xE5484D).into(),
             marked_range: None,
             last_layout: None,
             last_bounds: None,

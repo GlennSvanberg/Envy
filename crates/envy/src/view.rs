@@ -5074,7 +5074,7 @@ impl EnvyApp {
                     .pb(px(6.))
                     .text_size(px(11.5))
                     .line_height(px(15.))
-                    .text_color(p.danger)
+                    .text_color(p.warning)
                     .child(error),
             );
         }
@@ -5144,7 +5144,7 @@ impl EnvyApp {
                     left = left.child(neutral_summary_chip(
                         "diff-match",
                         IconName::Check,
-                        p.accent,
+                        p.fg_secondary,
                         "Files match".into(),
                         p,
                     ));
@@ -5171,7 +5171,7 @@ impl EnvyApp {
                         left = left.child(neutral_summary_chip(
                             "diff-right",
                             IconName::Minus,
-                            p.danger,
+                            p.warning,
                             format!("{only_right} right only"),
                             p,
                         ));
@@ -5291,14 +5291,14 @@ impl EnvyApp {
                     toolbar_chip(
                         "missing-vs-example-pill",
                         IconName::Info,
-                        p.accent,
+                        p.warning,
                         label,
-                        p.accent_subtle,
-                        p.accent_ring,
-                        p.accent,
+                        p.warning_bg,
+                        p.warning_border,
+                        p.warning,
                     )
                     .cursor_pointer()
-                    .hover(move |style| style.bg(p.accent.opacity(0.18)))
+                    .hover(move |style| style.bg(p.warning.opacity(0.18)))
                     .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                         compare_entity.update(cx, |this, cx| this.compare_with_example(cx));
                     }),
@@ -6076,9 +6076,9 @@ impl EnvyApp {
                     .gap(px(8.))
                     .items_center()
                     .justify_between()
-                    .bg(p.danger_bg)
+                    .bg(p.warning_bg)
                     .border_b_1()
-                    .border_color(p.danger_border)
+                    .border_color(p.warning_border)
                     .child(
                         h_flex()
                             .gap(px(8.))
@@ -6086,7 +6086,7 @@ impl EnvyApp {
                             .child(
                                 Icon::new(IconName::TriangleAlert)
                                     .size(px(14.))
-                                    .text_color(p.danger),
+                                    .text_color(p.warning),
                             )
                             .child(
                                 div()
@@ -6797,7 +6797,7 @@ impl EnvyApp {
                 }
                 diff::DiffKind::OnlyLeft => (IconName::Plus, p.accent, Some(p.diff_only_left_bg)),
                 diff::DiffKind::OnlyRight => {
-                    (IconName::Minus, p.danger, Some(p.diff_only_right_bg))
+                    (IconName::Minus, p.warning, Some(p.diff_only_right_bg))
                 }
                 diff::DiffKind::Disabled => (IconName::ToggleLeft, p.fg_tertiary, None),
             };

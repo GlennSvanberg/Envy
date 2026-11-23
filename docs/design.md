@@ -7,7 +7,7 @@ Design specification and token reference for Envy, a keyboard-first desktop edit
 ## 1. Design Principles
 
 1. **Calm, architectural craft.** Modeled on tools like Zed, Linear, and Raycast. Clear surface hierarchy, hairline borders, quiet chrome, and high-contrast data. No decorative gradients, no glow effects, no emoji, and no thick left-border accent bars.
-2. **One accent, used sparingly.** Logo green (`#34D399` in dark mode, `#047857` in light mode) is the single brand accent. It marks active focus, active selection, the active file tab, pinned projects, and search matches. Semantic amber and red are reserved strictly for status.
+2. **One accent, used sparingly.** Logo red (`#E5484D` in dark mode, `#CE2C31` in light mode) is the single brand accent. It marks active focus, active selection, the active file tab, pinned projects, search matches, and destructive actions such as Delete. Status stays amber, so a missing-key notice or a disk change does not look like the accent.
 3. **Strict 4 / 8 px spatial rhythm.** Every container height, gap, padding, and corner radius sits on a 4 px grid (with 1–2 px reserved exclusively for hairlines and micro-indicators).
 4. **Pixel-locked alignment.** Table headers, data rows, inline editors, and compare columns share identical width constants so opening an edit or toggling an action never shifts surrounding text.
 5. **Effortless keyboard navigation.** Every zone (`Projects`, `Tabs`, `Keys`) has clear, quiet visual focus feedback, automatic scroll-into-view, and concise keycap hints in the footer.
@@ -30,7 +30,7 @@ Envy separates **chrome** (title bar, sidebar, tab strip, footer) from the **can
 | `bg.kbd` | `#202228` | `#ECEEF2` | Keycap badges and neutral summary chips |
 | `bg.hover` | `#1E2127` | `#EEF0F4` | Row hover, tab hover, ghost button hover |
 | `bg.selected_muted` | `#1E2127` | `#E8EBF0` | Selected row when its zone is not focused |
-| `bg.selected_accent` | `#34D399` @ 9% | `#047857` @ 8% | Quiet tint for the selected row in the focused zone |
+| `bg.selected_accent` | `#E5484D` @ 9% | `#CE2C31` @ 8% | Quiet tint for the selected row in the focused zone |
 | `border.hairline` | `#23262C` | `#E4E7EC` | Pane dividers, bar separators, table headers |
 | `border.control` | `#2F333C` | `#CFD5DF` | Inputs, keycaps, outline buttons, modal borders |
 | `backdrop` | `#090A0C` @ 64% | `#111318` @ 32% | Modal overlay scrim |
@@ -47,17 +47,17 @@ Envy separates **chrome** (title bar, sidebar, tab strip, footer) from the **can
 
 | Token | Dark | Light | Usage |
 | --- | --- | --- | --- |
-| `accent` | `#34D399` | `#047857` | Active tab underline, pinned star, primary button, active toggles, search highlight |
-| `accent.ring` | `#34D399` @ 26% | `#047857` @ 28% | Quiet 1 px focused-row hairline, active toggle border, input focus border |
-| `accent.subtle` | `#34D399` @ 11% | `#047857` @ 9% | Active/toggled icon button fill, primary icon well, compare badges |
-| `status.warning` | `#F59E0B` | `#B45309` | Missing-vs-example pill text, diff-changed glyph |
-| `status.warning_dot` | `#F59E0B` | `#D97706` | Missing-keys drift indicator |
-| `status.warning_bg` | `#F59E0B` @ 9% | `#D97706` @ 9% | Missing-vs-example pill background |
-| `status.warning_border` | `#F59E0B` @ 22% | `#D97706` @ 22% | Missing-vs-example pill border |
-| `status.prod` | `#E5484D` | `#DC2626` | 6 px production file marker dot |
-| `status.danger` | `#F87171` | `#DC2626` | Save/load errors, external conflict accent, diff right-only glyph |
-| `status.danger_bg` | `#EF4444` @ 10% | `#DC2626` @ 8% | External disk change banner background |
-| `status.danger_border` | `#EF4444` @ 24% | `#DC2626` @ 22% | External disk change banner border |
+| `accent` | `#E5484D` | `#CE2C31` | Active tab underline, pinned star, primary button, active toggles, search highlight, Delete |
+| `accent.ring` | `#E5484D` @ 26% | `#CE2C31` @ 28% | Quiet 1 px focused-row hairline, active toggle border, input focus border |
+| `accent.subtle` | `#E5484D` @ 11% | `#CE2C31` @ 9% | Active/toggled icon button fill, primary icon well, compare badges |
+| `status.warning` | `#F59E0B` | `#B45309` | Missing-vs-example pill, diff-changed and right-only glyphs, disk-change banner |
+| `status.warning_dot` | `#F59E0B` | `#D97706` | Production file dot and missing-keys drift indicator |
+| `status.warning_bg` | `#F59E0B` @ 9% | `#D97706` @ 9% | Missing-vs-example pill and disk-change banner background |
+| `status.warning_border` | `#F59E0B` @ 22% | `#D97706` @ 22% | Missing-vs-example pill and disk-change banner border |
+| `status.prod` | `#F59E0B` | `#D97706` | 6 px production file marker dot |
+| `status.danger` | `#E5484D` | `#CE2C31` | Same red as `accent`. Delete confirmation and the Delete menu item |
+| `status.danger_bg` | `#E5484D` @ 10% | `#CE2C31` @ 8% | Delete button fill |
+| `status.danger_border` | `#E5484D` @ 24% | `#CE2C31` @ 22% | Delete button border |
 
 ### 2.4 Compare Row Tints
 
@@ -67,8 +67,8 @@ Equal rows stay completely plain (transparent). Differing rows receive only a wh
 | --- | --- | --- | --- | --- |
 | `Same` | `Equal` | `fg.tertiary` | transparent | transparent |
 | `Different` | `EqualNot` | `status.warning` | `#F59E0B` @ 4.5% | `#D97706` @ 5% |
-| `OnlyLeft` | `Plus` | `accent` | `#34D399` @ 3.5% | `#047857` @ 3.5% |
-| `OnlyRight` | `Minus` | `status.danger` | `#EF4444` @ 3.5% | `#DC2626` @ 3.5% |
+| `OnlyLeft` | `Plus` | `accent` | `#E5484D` @ 3.5% | `#CE2C31` @ 3.5% |
+| `OnlyRight` | `Minus` | `status.warning` | `#F59E0B` @ 3.5% | `#D97706` @ 3.5% |
 
 ---
 
@@ -162,7 +162,7 @@ Two font families only:
   - *Edit mode (table):*
     - Key filter `Input` (`w(220 px)`, `h(28 px)`, same top inset as Find a project, `Search` icon prefix, `cleanable(true)`, placeholder `"Find a key"`). Typing only filters the list and marks the first match; the caret stays in the field. Down moves into the list. Enter edits the marked key. The focused field uses a `1 px` accent border.
     - Key count (`12 px`, `fg.tertiary`): `"6 keys"` (or `"2 of 6"` while filtering).
-    - Missing-keys notice (shown only when `missing.len() > 0`): a compact pill in the same row, directly after the key count, using the logo accent (`bg: accent.subtle`, `border: 1 px accent.ring`, `text: accent`, `h(24 px)`, `px(8 px)`, `rounded(999 px)`, `12 px` `Info` icon + `"2 missing vs .env.example"`). It is a flex item, never absolutely positioned. The icon buttons on the right never shrink or get covered. On a narrow window the notice ellipsizes first (tooltip is the full sentence) and Find a key shrinks only after that, down to `120 px`. Clicking opens Compare with `.env.example`.
+    - Missing-keys notice (shown only when `missing.len() > 0`): a compact amber pill in the same row, directly after the key count (`bg: status.warning_bg`, `border: 1 px status.warning_border`, `text: status.warning`, `h(24 px)`, `px(8 px)`, `rounded(999 px)`, `12 px` `Info` icon + `"2 missing vs .env.example"`). Amber keeps it distinct from the red accent. It is a flex item, never absolutely positioned. The icon buttons on the right never shrink or get covered. On a narrow window the notice ellipsizes first (tooltip is the full sentence) and Find a key shrinks only after that, down to `120 px`. Clicking opens Compare with `.env.example`.
   - *Edit mode (plain text):*
     - Quiet notice pill (`bg.kbd`, `1 px border.hairline`, `Eye` icon + `"Plain text · values visible"`) and line count. The notice ellipsizes before the line count or the icon buttons give up space. The tooltip is the full sentence.
   - *Compare mode:*
@@ -185,7 +185,7 @@ Two font families only:
 
 ### 5.4 Key List (`Keys` Zone)
 - Edge-to-edge scrollable table with no outer frame border, flowing cleanly across the canvas like Zed panels.
-- **External disk change banner (conditional):** Compact `36 px` row with `status.danger_bg` fill, `border_b_1` (`status.danger_border`), `TriangleAlert` icon, concise copy `"This file changed on disk."`, and two inline compact buttons: `Reload` (`R`) and `Keep mine` (`Esc`).
+- **External disk change banner (conditional):** Compact `36 px` row with `status.warning_bg` fill, `border_b_1` (`status.warning_border`), `TriangleAlert` icon in `status.warning`, concise copy `"This file changed on disk."`, and two inline compact buttons: `Reload` (`R`) and `Keep mine` (`Esc`).
 - **Column header (`28 px`, `px(16 px)`, `border_b_1`, `bg.chrome` @ 55%):**
   - `KEY` — width fits the longest key in the open file (`160–560 px`, about `8.2 px` per character plus the toggle). Dragging the divider on the header's right edge sets a width that is remembered and used for every file. The pointer is `col-resize`.
   - `VALUE` — `flex_1`, `min_w(0)`
@@ -200,7 +200,7 @@ Two font families only:
     - Empty: `"empty"` in `fg.tertiary`.
   - **Actions column (`w(64 px)`, `flex_shrink_0`, `justify_end`, `gap(4 px)`):** `Copy` (`Copy`) and `Reveal/Hide` (`Eye` / `EyeOff`) `24 × 24 px` icon buttons. Visible when the row is selected (focused) or hovered.
   - **Tail action:** A quiet `+ Add key` ghost row (`32 px`, `fg.tertiary`) sits below the last key so the table finishes cleanly above open canvas space.
-  - **Inline editing (`Value`, `Rename`, `New`) & key-name autocomplete:** Renders inside the key column and the flexible value column with the shared single-line field and no outer double-border. The field shows a caret, a muted green selection, and ordinary editing (arrows, Home/End, Shift, word jumps, clipboard, undo). Up and Down stay in the field. Tab moves key → value → the next row's key. Enter commits and closes the field; the row stays selected. Esc cancels. The field uses the same type size, line height, and insets as the label, so the glyphs do not move. The ring sits outside the text. Once at least 1 character is typed into a new or renamed key name, a quiet compact list (max 5 keys, matching the key input width, no source badges or footer bar, lightly emphasizing the matched text) appears directly below, ranked by sibling env files missing from this file, other discovered projects, then common env key names. A click picks a key and never prefills a value.
+  - **Inline editing (`Value`, `Rename`, `New`) & key-name autocomplete:** Renders inside the key column and the flexible value column with the shared single-line field and no outer double-border. The field shows a caret, a muted red selection, and ordinary editing (arrows, Home/End, Shift, word jumps, clipboard, undo). Up and Down stay in the field. Tab moves key → value → the next row's key. Enter commits and closes the field; the row stays selected. Esc cancels. The field uses the same type size, line height, and insets as the label, so the glyphs do not move. The ring sits outside the text. Once at least 1 character is typed into a new or renamed key name, a quiet compact list (max 5 keys, matching the key input width, no source badges or footer bar, lightly emphasizing the matched text) appears directly below, ranked by sibling env files missing from this file, other discovered projects, then common env key names. A click picks a key and never prefills a value.
   - **File name:** `+` and `Ctrl+Shift+N` put the new file into the tab bar in the same inline editor used to rename a tab. The field starts as `.env`, or the next free name (`.env.local`, `.env.development`, `.env.dev`, then `.env.2`, `.env.3`, …) when that name exists. The name is selected so it can be changed before Enter. A quiet row under the tabs offers `Start empty` (the default) and `Copy from` each other env file, with `.env.example` first. Arrows and Enter choose, and so does a click. Enter in the name field with nothing else chosen creates an empty file. A copy keeps keys and comments. Example files keep their values. Any other file copies keys only until the row's toggle is set to keys and values. Double-clicking a tab renames that file in place. Enter confirms, Esc cancels, and a name that is taken or not an env file is explained on the line under the field. Right-clicking a tab opens Rename, Duplicate, Reveal in Explorer, and Delete file. Delete asks `Delete {name}?` and Enter confirms.
 
 ### 5.4b Plain Text Editor View

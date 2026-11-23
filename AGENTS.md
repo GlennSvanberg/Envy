@@ -65,7 +65,7 @@ UI copy speaks to the user about their task, never about the implementation. Do 
 
 ## Design rules
 
-- One accent: the logo green (`#34D399` on a dark theme, `#047857` on a light theme). Selection, the active tab, focus, and search matches use it. Warning and danger stay for status.
+- One accent: the logo red (`#E5484D` on a dark theme, `#CE2C31` on a light theme). Selection, the active tab, focus, search matches, and Delete use it. Warnings stay amber.
 - Never use a thick left-border bar as a selection or callout indicator. A selected row is a quiet fill and accent text. A focused area is a thin outline.
 - UI copy talks about the task. No implementation talk, and no decorative filler.
 - No command palette. Search is the sidebar field and the field above the keys.

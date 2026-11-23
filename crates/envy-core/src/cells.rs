@@ -67,7 +67,7 @@ pub fn edit_value_origin(key_column: f32) -> TextOrigin {
     value_origin(key_column)
 }
 
-/// File name on a tab. `prod_dot` is the red mark in front of a production file.
+/// File name on a tab. `prod_dot` is the amber mark in front of a production file.
 pub fn display_filename_origin(prod_dot: bool) -> TextOrigin {
     filename_origin(prod_dot)
 }
