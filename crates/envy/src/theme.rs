@@ -3,15 +3,19 @@
 //! One brand accent (the logo green), clear chrome/canvas surface separation,
 //! and explicit light and dark values for every token.
 
+use envy_core::{PROJECT_HEADER_H_PX, TAB_BAR_H_PX, TOOLBAR_H_PX};
 use gpui_kit::component::Theme;
 use gpui_kit::{px, rgb, App, Hsla, Pixels};
 
 pub const SIDEBAR_W: Pixels = px(256.);
 pub const TITLE_BAR_H: Pixels = px(36.);
-pub const SIDEBAR_HEADER_H: Pixels = px(36.);
+/// Same height as the file tab row, so the search bands start together.
+pub const SIDEBAR_HEADER_H: Pixels = px(PROJECT_HEADER_H_PX);
 pub const SIDEBAR_ROW_BRANCH_H: Pixels = px(40.);
-pub const TAB_BAR_H: Pixels = px(36.);
-pub const TOOLBAR_H: Pixels = px(40.);
+/// Same height as the sidebar header. See `project_search_frame`.
+pub const TAB_BAR_H: Pixels = px(TAB_BAR_H_PX);
+/// Same height as the sidebar search band. See `key_search_frame`.
+pub const TOOLBAR_H: Pixels = px(TOOLBAR_H_PX);
 pub const COL_HEADER_H: Pixels = px(28.);
 pub const SECTION_ROW_H: Pixels = px(28.);
 pub const KEY_ROW_H: Pixels = px(32.);
@@ -204,4 +208,19 @@ pub fn apply_palette(cx: &mut App) {
         theme.danger = p.danger;
         theme.selection = p.accent.opacity(0.24);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use envy_core::{key_search_frame, project_search_frame, SEARCH_BAND_H_PX};
+
+    #[test]
+    fn chrome_tokens_keep_the_search_fields_aligned() {
+        assert_eq!(SIDEBAR_HEADER_H, px(PROJECT_HEADER_H_PX));
+        assert_eq!(TAB_BAR_H, px(TAB_BAR_H_PX));
+        assert_eq!(TOOLBAR_H, px(TOOLBAR_H_PX));
+        assert_eq!(px(SEARCH_BAND_H_PX), TOOLBAR_H);
+        assert_eq!(project_search_frame(), key_search_frame());
+    }
 }

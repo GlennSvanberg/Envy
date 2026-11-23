@@ -9,6 +9,7 @@
 //! enough to rename it into place. Callers must not log [`Entry::value`].
 
 pub mod cells;
+mod chrome;
 pub mod columns;
 pub mod config;
 pub mod deeplink;
@@ -33,6 +34,11 @@ pub use cells::{
     KEY_LINE_PX, KEY_RELATED_ICON_PX, KEY_RELATED_PAD_PX, KEY_ROW_H_PX, KEY_TEXT_PX,
     KEY_TOGGLE_W_PX, ROW_BORDER_PX, ROW_PAD_X_PX, TAB_DOT_PX, TAB_GAP_PX, TAB_H_PX, TAB_LINE_PX,
     TAB_PAD_X_PX, TAB_TEXT_PX, VALUE_PAD_RIGHT_PX,
+};
+pub use chrome::{
+    centered_search_frame, key_search_frame, project_search_frame, search_field_inset, SearchFrame,
+    PROJECT_HEADER_H_PX, SEARCH_BAND_BORDER_PX, SEARCH_BAND_H_PX, SEARCH_FIELD_H_PX,
+    SEARCH_LINE_PX, SEARCH_TEXT_PX, TAB_BAR_H_PX, TOOLBAR_H_PX,
 };
 pub use columns::{
     clamp_key_column_px, clamp_sidebar_px, fitted_key_column_px, KEY_COLUMN_MAX_PX,

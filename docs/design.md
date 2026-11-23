@@ -133,7 +133,7 @@ Two font families only:
 
 ### 5.1 Sidebar (`Projects` Zone)
 - **Header (`36 px`):** Left shows `PROJECTS` (`11 px`, medium, `fg.tertiary`) plus either a subtle scanning spinner + live file count (`12 files`) while scanning, or the project count when idle. Right has two `28 × 28 px` ghost icon buttons: `Refresh` (`RefreshCw`, tooltip `"Rescan folders · Ctrl+R"`) and `Add folder` (`FolderPlus`, tooltip `"Add folder · Ctrl+O"`).
-- **Search field:** `8 px` horizontal padding, `8 px` bottom padding. `Input` (`28 px`, `Search` icon prefix, `cleanable(true)`, placeholder `"Find a project"`). Hidden when no folders have been added.
+- **Search field:** A `40 px` band, the same height as the workspace toolbar, with `8 px` horizontal padding. The `28 px` input uses the same top inset as Find a key (the toolbar hairline stays inside that band, so the inset is `5 px`). `Search` icon prefix, clearable, placeholder `"Find a project"`. Shown even when no folders have been added. On launch the caret is in this field, including when the last project and file are restored, until the user clicks or types. The focused field uses a `1 px` accent border.
 - **Project list:** Edge-to-edge scrollable container (`project_scroll`) with no outer box border.
 - **Width:** `256 px` until the user drags the handle on the sidebar's right edge (`200–480 px`). The width is remembered. The handle is a `1 px` hairline in a `7 px` hit area; the pointer is `col-resize`, and the line takes the accent color while hovered.
 - **Sections:** `FAVORITES` then `ALL PROJECTS`, each a `11 px` medium `fg.tertiary` label. A hairline sits above All projects when Favorites is also shown. An empty section is omitted, including while the list is filtered. Favorites keep pin order. All projects are recent, then name.
@@ -159,7 +159,7 @@ Two font families only:
 - Height `40 px`, `px(12 px)`, `bg.canvas`, `border_b_1` (`border.hairline`), `items_center`, `justify_between`.
 - **Left region (`gap(8 px)`):**
   - *Edit mode (table):*
-    - Key filter `Input` (`w(220 px)`, `h(28 px)`, `Search` icon prefix, `cleanable(true)`, placeholder `"Find a key"`).
+    - Key filter `Input` (`w(220 px)`, `h(28 px)`, same top inset as Find a project, `Search` icon prefix, `cleanable(true)`, placeholder `"Find a key"`). The focused field uses a `1 px` accent border.
     - Key count (`12 px`, `fg.tertiary`): `"6 keys"` (or `"2 of 6"` while filtering).
     - Missing-keys drift pill (shown only when `missing.len() > 0`): calm interactive amber pill (`bg: status.warning_bg`, `border: 1 px status.warning_border`, `text: status.warning`, `h(24 px)`, `px(8 px)`, `rounded(999 px)`, `12 px` icon + `"2 missing vs .env.example"`). Clicking opens Compare with `.env.example`.
   - *Edit mode (plain text):*

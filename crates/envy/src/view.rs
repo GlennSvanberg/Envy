@@ -20,12 +20,13 @@ use envy_core::{
     diff, enter_while_suggesting, fill_key_index, fitted_key_column_px, host_path_style,
     is_cell_commit_key, is_env_key, load_index_cache, match_span, native_project_path,
     next_env_filename, plan_paste, projects_from_cache, rename_env_file, route_cell_edit,
-    row_click, save_index_cache, save_text, scan_paths, search_landing, sidebar_path_chars,
-    sidebar_rank, step_index, suggest_keys, truncate_path_head, upsert_file, CellMotion, Config,
-    CopyValues, Deeplink, EditCell, EditorView, EnterEffect, EnvDocument, EnvFile,
-    EnvFileNameError, FoundEnv, KeySuggestion, OpenFile, PathStyle, Project, RowClick, RowTarget,
-    ScanError, ThemeSetting, KEY_CELL_GAP_PX, KEY_CELL_PAD_RIGHT_PX, KEY_LINE_PX,
-    KEY_RELATED_ICON_PX, KEY_RELATED_PAD_PX, KEY_TEXT_PX, KEY_TOGGLE_W_PX, TAB_DOT_PX, TAB_GAP_PX,
+    row_click, save_index_cache, save_text, scan_paths, search_field_inset, search_landing,
+    sidebar_path_chars, sidebar_rank, step_index, suggest_keys, truncate_path_head, upsert_file,
+    CellMotion, Config, CopyValues, Deeplink, EditCell, EditorView, EnterEffect, EnvDocument,
+    EnvFile, EnvFileNameError, FoundEnv, KeySuggestion, OpenFile, PathStyle, Project, RowClick,
+    RowTarget, ScanError, ThemeSetting, KEY_CELL_GAP_PX, KEY_CELL_PAD_RIGHT_PX, KEY_LINE_PX,
+    KEY_RELATED_ICON_PX, KEY_RELATED_PAD_PX, KEY_TEXT_PX, KEY_TOGGLE_W_PX, SEARCH_BAND_BORDER_PX,
+    SEARCH_BAND_H_PX, SEARCH_FIELD_H_PX, SEARCH_LINE_PX, SEARCH_TEXT_PX, TAB_DOT_PX, TAB_GAP_PX,
     TAB_H_PX, TAB_LINE_PX, TAB_MENU_LEN, TAB_PAD_X_PX, TAB_TEXT_PX, VALUE_PAD_RIGHT_PX,
 };
 use gpui_kit::assets::IconName;
@@ -39,8 +40,9 @@ use gpui_kit::component::{
 use gpui_kit::prelude::*;
 use gpui_kit::{
     div, px, size, AnyView, AnyWindowHandle, App, Bounds, ClipboardItem, Context, Entity,
-    FocusHandle, Focusable, FontWeight, KeyDownEvent, MouseButton, PathPromptOptions, ScrollHandle,
-    SharedString, Subscription, Task, Window, WindowBounds, WindowOptions,
+    FocusHandle, Focusable, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent,
+    PathPromptOptions, ScrollHandle, SharedString, Subscription, Task, Window, WindowBounds,
+    WindowOptions,
 };
 
 use crate::actions::*;
@@ -157,6 +159,9 @@ pub struct EnvyApp {
     sort_recent: Vec<PathBuf>,
     open: Option<OpenFile>,
     zone: Zone,
+    /// Stay in Find a project until the user clicks or types, including
+    /// while a restored file is still opening.
+    focus_project_on_open: bool,
     cursor: usize,
     revealed: HashSet<String>,
     show_all: bool,
@@ -291,6 +296,7 @@ impl EnvyApp {
             sort_recent: Vec::new(),
             open: None,
             zone: Zone::Projects,
+            focus_project_on_open: true,
             cursor: 0,
             revealed: HashSet::new(),
             show_all: false,
@@ -432,6 +438,7 @@ impl EnvyApp {
         if self.config.folders.is_empty() {
             self.log_startup(None, None);
             self.status = "Add a folder to start. Ctrl+O".into();
+            self.hold_open_focus(cx);
             cx.notify();
             return;
         }
@@ -442,6 +449,8 @@ impl EnvyApp {
         }
         self.arm_watch();
         self.begin_scan(false, cx);
+        self.hold_open_focus(cx);
+        cx.notify();
     }
 
     pub fn window_options(bounds_cx: &mut App) -> WindowOptions {
@@ -487,14 +496,19 @@ impl EnvyApp {
             window,
             |this, state, event, window, cx| match event {
                 TextInputEvent::Change => {
+                    this.focus_project_on_open = false;
                     this.filter_query = state.read(cx).value().to_string();
                     this.scroll_project_into_view();
                     cx.notify();
                 }
                 TextInputEvent::Submit => {
+                    this.focus_project_on_open = false;
                     this.open_filtered_project(window, cx);
                 }
-                TextInputEvent::ExitDown => this.leave_search(Zone::Projects, window, cx),
+                TextInputEvent::ExitDown => {
+                    this.focus_project_on_open = false;
+                    this.leave_search(Zone::Projects, window, cx);
+                }
                 TextInputEvent::Focus | TextInputEvent::Blur => {}
             },
         ));
@@ -1477,6 +1491,7 @@ impl EnvyApp {
                         } else if self.status == "Opening…" || self.status == "Saving…" {
                             self.status.clear();
                         }
+                        self.hold_open_focus(cx);
                         let _ = path;
                     }
                     Err(err) => {
@@ -1749,6 +1764,20 @@ impl EnvyApp {
 
     fn focus_self(&self, window: &mut Window, cx: &mut App) {
         window.focus(&self.focus, cx);
+    }
+
+    /// Put the caret in Find a project. A restored file must not take it.
+    fn hold_open_focus(&mut self, cx: &mut Context<Self>) {
+        if !self.focus_project_on_open {
+            return;
+        }
+        self.zone = Zone::Projects;
+        let handle = self.project_filter.focus_handle(cx);
+        self.window
+            .update(cx, |_, window, cx| {
+                window.focus(&handle, cx);
+            })
+            .ok();
     }
 
     fn close_editor(&mut self) {
@@ -3846,6 +3875,7 @@ impl EnvyApp {
     }
 
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_project_on_open = false;
         let mods = &event.keystroke.modifiers;
         let key = event.keystroke.key.as_str();
         if mods.control && !mods.alt && !mods.platform && matches!(self.overlay, Overlay::None) {
@@ -4157,7 +4187,7 @@ impl Render for EnvyApp {
         } else {
             let missing = self.missing_names();
             let tabs = self.render_tabs(p, mono.clone(), cx);
-            let toolbar = self.render_toolbar(p, missing.len(), cx);
+            let toolbar = self.render_toolbar(p, missing.len(), window, cx);
             let body = if self.diff_open {
                 self.render_diff_view(p, mono.clone(), cx)
             } else if self.editor_view == EditorView::Text {
@@ -4253,6 +4283,9 @@ impl Render for EnvyApp {
             .on_action(cx.listener(|this, _: &ReloadExternal, _, cx| this.reload_external(cx)))
             .on_action(cx.listener(|this, _: &KeepMine, window, cx| this.cancel(window, cx)))
             .on_action(cx.listener(|this, _: &PasteBlock, _, cx| this.paste_from_clipboard(cx)))
+            .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, _| {
+                this.focus_project_on_open = false;
+            }))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_key(event, window, cx);
             }))
@@ -4328,6 +4361,21 @@ impl Render for EnvyApp {
                 );
             }
             title_content = title_content.child(crumb);
+        }
+
+        if self.focus_project_on_open {
+            self.zone = Zone::Projects;
+            let handle = self.project_filter.focus_handle(cx);
+            if !handle.is_focused(window) {
+                cx.defer_in(window, |this, window, cx| {
+                    if !this.focus_project_on_open {
+                        return;
+                    }
+                    this.zone = Zone::Projects;
+                    let handle = this.project_filter.focus_handle(cx);
+                    window.focus(&handle, cx);
+                });
+            }
         }
 
         v_flex()
@@ -4511,14 +4559,20 @@ impl EnvyApp {
                     ),
             );
 
-        let search_box = div()
+        let search_inset =
+            search_field_inset(SEARCH_BAND_H_PX, SEARCH_FIELD_H_PX, SEARCH_BAND_BORDER_PX);
+        let search_box = h_flex()
+            .h(px(SEARCH_BAND_H_PX))
+            .w_full()
             .px(px(8.))
-            .pb(px(8.))
+            .pt(px(search_inset))
+            .items_start()
             .flex_shrink_0()
             .child(search_field(
                 &self.project_filter,
                 "clear-project-filter",
                 p,
+                window,
                 cx,
             ));
 
@@ -4709,9 +4763,7 @@ impl EnvyApp {
             .border_r_1()
             .border_color(p.border_hairline)
             .child(header)
-            .when(!self.config.folders.is_empty(), |sidebar| {
-                sidebar.child(search_box)
-            })
+            .child(search_box)
             .child(
                 div()
                     .id("project-scroll-host")
@@ -4938,6 +4990,7 @@ impl EnvyApp {
         &self,
         p: Palette,
         missing_count: usize,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
         let entity = cx.entity();
@@ -5111,6 +5164,7 @@ impl EnvyApp {
                     &self.key_filter,
                     "clear-key-filter",
                     p,
+                    window,
                     cx,
                 )))
                 .child(
@@ -5342,12 +5396,15 @@ impl EnvyApp {
                 }),
             );
 
+        let search_inset =
+            search_field_inset(SEARCH_BAND_H_PX, SEARCH_FIELD_H_PX, SEARCH_BAND_BORDER_PX);
         h_flex()
             .h(TOOLBAR_H)
             .flex_shrink_0()
             .px(px(12.))
+            .pt(px(search_inset))
             .gap(px(12.))
-            .items_center()
+            .items_start()
             .justify_between()
             .bg(p.bg_canvas)
             .border_b_1()
@@ -8399,19 +8456,23 @@ fn search_field(
     input: &Entity<TextInput>,
     clear_id: &'static str,
     p: Palette,
+    window: &Window,
     cx: &mut Context<EnvyApp>,
 ) -> gpui_kit::Div {
     let empty = input.read(cx).is_empty();
+    let focused = input.read(cx).focus_handle(cx).is_focused(window);
     let clear_input = input.clone();
     h_flex()
-        .h(px(28.))
+        .h(px(SEARCH_FIELD_H_PX))
         .w_full()
         .px(px(8.))
         .gap(px(6.))
         .items_center()
+        .text_size(px(SEARCH_TEXT_PX))
+        .line_height(px(SEARCH_LINE_PX))
         .rounded(px(6.))
         .border_1()
-        .border_color(p.border_control)
+        .border_color(if focused { p.accent } else { p.border_control })
         .bg(p.bg_surface)
         .child(
             Icon::new(IconName::Search)
