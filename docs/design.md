@@ -154,6 +154,7 @@ Two font families only:
   - **Indicators:**
     - Production file: `6 px` red dot (`status.prod`) before the filename.
     - Missing keys vs `.env.example`: subtle `5 px` amber dot (`status.warning_dot` @ 65%) after the filename with tooltip `"Missing keys vs .env.example"`.
+    - **Same filename:** The filename stays. A muted suffix (`11 px`, normal weight, `fg.tertiary`, at most `96 px`) shows the shortest unique trailing directories (`backend`, `api/src`). A file in the project root shows `./` only when another file has the same name. The tooltip starts with the project-relative path (`backend/.env · Ctrl+click to compare`). Compare headers, the Copy from row, and `Delete {path}?` use the same distinction.
 
 ### 5.3 Workspace Toolbar
 - Height `40 px`, `px(12 px)`, `bg.canvas`, `border_b_1` (`border.hairline`), `items_center`, `justify_between`.

@@ -19,6 +19,7 @@ pub mod document;
 pub mod future;
 pub mod hotkey;
 pub mod interact;
+mod labels;
 pub mod names;
 pub mod paste;
 pub mod pathfmt;
@@ -64,6 +65,7 @@ pub use interact::{
     search_landing, step_index, CellMotion, CellRoute, EditCell, EnterEffect, RowClick, RowTarget,
     ValueMotion, ValueRoute, TAB_MENU_LEN,
 };
+pub use labels::{labeled_name, relative_slash_path, tab_labels, unique_dir_suffixes, TabLabel};
 pub use names::{
     check_env_filename, env_name_taken, next_env_filename, normalize_env_filename, rename_env_file,
     EnvFileNameError,

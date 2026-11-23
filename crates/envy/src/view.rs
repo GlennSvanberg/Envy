@@ -18,16 +18,17 @@ use envy_core::{
     abbreviate_home, attach_git_identity, cache_from_projects, check_env_filename,
     clamp_key_column_px, clamp_sidebar_px, copied_document, copy_source_order, copy_values_for,
     diff, enter_while_suggesting, fill_key_index, fitted_key_column_px, host_path_style,
-    is_cell_commit_key, is_env_key, load_index_cache, match_span, native_project_path,
-    next_env_filename, plan_paste, projects_from_cache, rename_env_file, route_cell_edit,
-    row_click, save_index_cache, save_text, scan_paths, search_field_inset, search_landing,
-    sidebar_path_chars, sidebar_rank, step_index, suggest_keys, truncate_path_head, upsert_file,
-    CellMotion, Config, CopyValues, Deeplink, EditCell, EditorView, EnterEffect, EnvDocument,
-    EnvFile, EnvFileNameError, FoundEnv, KeySuggestion, OpenFile, PathStyle, Project, RowClick,
-    RowTarget, ScanError, ThemeSetting, KEY_CELL_GAP_PX, KEY_CELL_PAD_RIGHT_PX, KEY_LINE_PX,
-    KEY_RELATED_ICON_PX, KEY_RELATED_PAD_PX, KEY_TEXT_PX, KEY_TOGGLE_W_PX, SEARCH_BAND_BORDER_PX,
-    SEARCH_BAND_H_PX, SEARCH_FIELD_H_PX, SEARCH_LINE_PX, SEARCH_TEXT_PX, TAB_DOT_PX, TAB_GAP_PX,
-    TAB_H_PX, TAB_LINE_PX, TAB_MENU_LEN, TAB_PAD_X_PX, TAB_TEXT_PX, VALUE_PAD_RIGHT_PX,
+    is_cell_commit_key, is_env_key, labeled_name, load_index_cache, match_span,
+    native_project_path, next_env_filename, plan_paste, projects_from_cache, relative_slash_path,
+    rename_env_file, route_cell_edit, row_click, save_index_cache, save_text, scan_paths,
+    search_field_inset, search_landing, sidebar_path_chars, sidebar_rank, step_index, suggest_keys,
+    tab_labels, truncate_path_head, upsert_file, CellMotion, Config, CopyValues, Deeplink,
+    EditCell, EditorView, EnterEffect, EnvDocument, EnvFile, EnvFileNameError, FoundEnv,
+    KeySuggestion, OpenFile, PathStyle, Project, RowClick, RowTarget, ScanError, ThemeSetting,
+    KEY_CELL_GAP_PX, KEY_CELL_PAD_RIGHT_PX, KEY_LINE_PX, KEY_RELATED_ICON_PX, KEY_RELATED_PAD_PX,
+    KEY_TEXT_PX, KEY_TOGGLE_W_PX, SEARCH_BAND_BORDER_PX, SEARCH_BAND_H_PX, SEARCH_FIELD_H_PX,
+    SEARCH_LINE_PX, SEARCH_TEXT_PX, TAB_DOT_PX, TAB_GAP_PX, TAB_H_PX, TAB_LINE_PX, TAB_MENU_LEN,
+    TAB_PAD_X_PX, TAB_TEXT_PX, VALUE_PAD_RIGHT_PX,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -1643,14 +1644,30 @@ impl EnvyApp {
         Some(project.files.get(index)?.path.clone())
     }
 
-    fn side_name(&self, side: DiffSide) -> String {
-        self.side_path(side)
-            .and_then(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .map(str::to_string)
-            })
-            .unwrap_or_else(|| "Choose a file".into())
+    fn side_name(&self, side: DiffSide) -> (String, String) {
+        let Some(index) = (match side {
+            DiffSide::Left => self.diff_left,
+            DiffSide::Right => self.diff_right,
+        }) else {
+            return ("Choose a file".into(), String::new());
+        };
+        self.current_tab_labels()
+            .get(index)
+            .map(|label| (label.name.clone(), label.suffix.clone()))
+            .unwrap_or_else(|| ("Choose a file".into(), String::new()))
+    }
+
+    fn current_tab_labels(&self) -> Vec<envy_core::TabLabel> {
+        let Some(project) = self.project_ix.and_then(|ix| self.projects.get(ix)) else {
+            return Vec::new();
+        };
+        let relative: Vec<String> = project
+            .files
+            .iter()
+            .map(|file| relative_slash_path(&project.root, &file.path))
+            .collect();
+        let borrowed: Vec<&str> = relative.iter().map(String::as_str).collect();
+        tab_labels(&borrowed)
     }
 
     fn doc_if_open(&self, path: &Path) -> Option<EnvDocument> {
@@ -3470,12 +3487,13 @@ impl EnvyApp {
     }
 
     fn ask_delete_tab(&mut self, file_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(name) = self
-            .project_ix
-            .and_then(|ix| self.projects.get(ix))
-            .and_then(|project| project.files.get(file_ix))
-            .map(|file| file.name.clone())
-        else {
+        let Some(name) = self.current_tab_labels().get(file_ix).map(|label| {
+            if label.suffix.is_empty() {
+                label.name.clone()
+            } else {
+                label.relative.clone()
+            }
+        }) else {
             return;
         };
         self.overlay = Overlay::DeleteFile { file_ix, name };
@@ -4791,6 +4809,7 @@ impl EnvyApp {
         let file_ix = self.file_ix;
         let zone = self.zone;
         let can_compare = file_tabs.len() >= 2;
+        let labels = self.current_tab_labels();
 
         let mut tabs = h_flex()
             .id("file-tabs")
@@ -4816,6 +4835,11 @@ impl EnvyApp {
             let cursor_tab = zone == Zone::Tabs && self.tab_cursor == index;
             let entity = cx.entity();
             let name = file.name.clone();
+            let label = labels.get(index);
+            let suffix = label.map(|label| label.suffix.clone()).unwrap_or_default();
+            let relative = label
+                .map(|label| label.relative.clone())
+                .unwrap_or_else(|| name.clone());
             if let FilePrompt::Rename { file_ix, input, .. } = &self.file_prompt {
                 if *file_ix == index {
                     let input = input.clone();
@@ -4824,7 +4848,7 @@ impl EnvyApp {
                 }
             }
 
-            let mut tip_parts = vec![name.clone()];
+            let mut tip_parts = vec![relative];
             if file.prod {
                 tip_parts.push("Production".into());
             }
@@ -4925,7 +4949,7 @@ impl EnvyApp {
                 );
             }
 
-            tab = tab.child(div().truncate().child(name));
+            tab = tab.child(file_title(&name, &suffix, p));
 
             if file.missing_vs_example {
                 tab = tab.child(
@@ -6481,8 +6505,10 @@ impl EnvyApp {
         mono: SharedString,
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
-        let left_name = self.side_name(DiffSide::Left);
-        let right_name = self.side_name(DiffSide::Right);
+        let (left_name, left_suffix) = self.side_name(DiffSide::Left);
+        let (right_name, right_suffix) = self.side_name(DiffSide::Right);
+        let left_label = labeled_name(&left_name, &left_suffix);
+        let right_label = labeled_name(&right_name, &right_suffix);
         let one_file = self
             .project_ix
             .and_then(|ix| self.projects.get(ix))
@@ -6572,14 +6598,14 @@ impl EnvyApp {
                             .min_w(px(0.))
                             .child(side_badge("L", p))
                             .child(
-                                div()
+                                h_flex()
                                     .font_family(mono.clone())
                                     .text_size(px(12.))
                                     .line_height(px(16.))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(p.fg_primary)
-                                    .truncate()
-                                    .child(left_name.clone()),
+                                    .min_w(px(0.))
+                                    .child(file_title(&left_name, &left_suffix, p)),
                             ),
                     )
                     .when(right_only_count > 0, |bar| {
@@ -6590,7 +6616,7 @@ impl EnvyApp {
                                 .icon(IconName::ArrowLeft)
                                 .label("Copy missing")
                                 .tooltip(format!(
-                                    "Copy {right_only_count} missing into {left_name}"
+                                    "Copy {right_only_count} missing into {left_label}"
                                 ))
                                 .on_click(move |_, _, cx| {
                                     missing_left_entity.update(cx, |this, cx| {
@@ -6628,14 +6654,14 @@ impl EnvyApp {
                             .min_w(px(0.))
                             .child(side_badge("R", p))
                             .child(
-                                div()
+                                h_flex()
                                     .font_family(mono.clone())
                                     .text_size(px(12.))
                                     .line_height(px(16.))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(p.fg_primary)
-                                    .truncate()
-                                    .child(right_name.clone()),
+                                    .min_w(px(0.))
+                                    .child(file_title(&right_name, &right_suffix, p)),
                             ),
                     )
                     .when(left_only_count > 0, |bar| {
@@ -6646,7 +6672,7 @@ impl EnvyApp {
                                 .icon(IconName::ArrowRight)
                                 .label("Copy missing")
                                 .tooltip(format!(
-                                    "Copy {left_only_count} missing into {right_name}"
+                                    "Copy {left_only_count} missing into {right_label}"
                                 ))
                                 .on_click(move |_, _, cx| {
                                     missing_right_entity.update(cx, |this, cx| {
@@ -6834,9 +6860,9 @@ impl EnvyApp {
 
             if can_copy_right {
                 let tip = if row.left_disabled {
-                    format!("Copy to {right_name} (off)")
+                    format!("Copy to {right_label} (off)")
                 } else {
-                    format!("Copy to {right_name}")
+                    format!("Copy to {right_label}")
                 };
                 gutter = gutter.child(
                     row_icon_button(
@@ -6854,9 +6880,9 @@ impl EnvyApp {
             }
             if can_copy_left {
                 let tip = if row.right_disabled {
-                    format!("Copy to {left_name} (off)")
+                    format!("Copy to {left_label} (off)")
                 } else {
-                    format!("Copy to {left_name}")
+                    format!("Copy to {left_label}")
                 };
                 gutter = gutter.child(
                     row_icon_button(
@@ -6932,6 +6958,7 @@ impl EnvyApp {
             .unwrap_or_default();
         let names: Vec<&str> = files.iter().map(|file| file.name.as_str()).collect();
         let order = copy_source_order(&names);
+        let labels = self.current_tab_labels();
 
         let mut row = h_flex()
             .id("new-file-sources")
@@ -6944,7 +6971,7 @@ impl EnvyApp {
             .bg(p.bg_canvas)
             .border_b_1()
             .border_color(p.border_hairline)
-            .child(self.source_choice(0, "Start empty", source, source_focus, p, cx));
+            .child(self.source_choice(0, "Start empty", "", source, source_focus, p, cx));
 
         if !order.is_empty() {
             row = row.child(
@@ -6957,7 +6984,19 @@ impl EnvyApp {
             );
             for (slot, file_index) in order.iter().copied().enumerate() {
                 let name = files[file_index].name.clone();
-                row = row.child(self.source_choice(slot + 1, &name, source, source_focus, p, cx));
+                let suffix = labels
+                    .get(file_index)
+                    .map(|label| label.suffix.clone())
+                    .unwrap_or_default();
+                row = row.child(self.source_choice(
+                    slot + 1,
+                    &name,
+                    &suffix,
+                    source,
+                    source_focus,
+                    p,
+                    cx,
+                ));
             }
         }
 
@@ -6976,6 +7015,7 @@ impl EnvyApp {
         &self,
         index: usize,
         label: &str,
+        suffix: &str,
         selected: usize,
         focused: bool,
         p: Palette,
@@ -7016,7 +7056,7 @@ impl EnvyApp {
         } else {
             chip = chip.hover(move |style| style.bg(p.bg_hover).text_color(p.fg_primary));
         }
-        chip.child(label.to_string())
+        chip.child(file_title(label, suffix, p))
     }
 
     fn copy_mode_toggle(
@@ -8450,6 +8490,28 @@ fn lined_field(input: &Entity<TextInput>, p: Palette) -> gpui_kit::Div {
         .border_color(p.border_control)
         .bg(p.bg_surface)
         .child(input.clone())
+}
+
+fn file_title(name: &str, suffix: &str, p: Palette) -> gpui_kit::Div {
+    let mut title = h_flex()
+        .gap(px(6.))
+        .items_center()
+        .min_w(px(0.))
+        .child(div().child(name.to_string()));
+    if !suffix.is_empty() {
+        title = title.child(
+            div()
+                .max_w(px(96.))
+                .min_w(px(0.))
+                .truncate()
+                .text_size(px(11.))
+                .line_height(px(14.))
+                .font_weight(FontWeight::NORMAL)
+                .text_color(p.fg_tertiary)
+                .child(suffix.to_string()),
+        );
+    }
+    title
 }
 
 fn search_field(
