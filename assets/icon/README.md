@@ -1,6 +1,6 @@
 # Envy logo
 
-The tile is red (`#E5484D`, the same red as the dark accent) with a white E made of three lines, like the KEY=value rows in a .env file, plus a light text caret for keyboard editing.
+The tile is red (`#E5243B`, the same red as the light accent) with a white E made of three lines, like the KEY=value rows in a .env file, plus a light text caret for keyboard editing.
 
 - envy-icon.svg: master icon, used from 48 px and up
 - envy-icon-small.svg: thicker version with no caret, used at 16–32 px

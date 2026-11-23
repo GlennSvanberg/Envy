@@ -2,42 +2,49 @@
 //!
 //! The tab keeps the filename. When two files in the project have that name,
 //! each one also gets the shortest trailing run of directories that no other
-//! file with that name ends with. A file in the project root gets `./` only
-//! when another file has the same name.
+//! file with that name ends with. A file in the project root has no suffix:
+//! the other file's folder is enough to tell them apart.
 
 use std::collections::HashMap;
-use std::path::{Component, Path};
+use std::path::Path;
 
 /// Filename, the directory suffix that tells it apart, and the project-relative path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TabLabel {
     pub name: String,
-    /// Empty when the filename is unique. `./` for the project root when it
-    /// collides. Otherwise a suffix such as `backend` or `api/src`.
+    /// Empty when the filename is unique, and empty for the project root.
+    /// Otherwise a suffix such as `backend` or `api/src`.
     pub suffix: String,
-    /// `backend/.env`, `./.env` when the root collides, or `.env`.
+    /// `backend/.env`, or `.env` for a file in the project root.
     pub relative: String,
 }
 
 /// Path inside the project, with `/` between parts. A path outside `root`
 /// falls back to the file name so the suffix cannot become an absolute path.
+///
+/// Windows paths are compared without caring about `\` versus `/`, a `\\?\`
+/// or `\\?\UNC\` prefix, or the case of the drive letter and folders.
+/// `strip_prefix` misses those, and every file then looks like it sits in
+/// the project root.
 pub fn relative_slash_path(root: &Path, path: &Path) -> String {
-    let rel = match path.strip_prefix(root) {
-        Ok(rel) => rel,
-        Err(_) => {
-            return path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default();
+    let root_parts = normalize_parts(root);
+    let path_parts = normalize_parts(path);
+    let windows = looks_windows(root) || looks_windows(path);
+    if !root_parts.is_empty()
+        && path_parts.len() >= root_parts.len()
+        && root_parts
+            .iter()
+            .zip(&path_parts)
+            .all(|(root_part, path_part)| same_part(root_part, path_part, windows))
+    {
+        let rest = &path_parts[root_parts.len()..];
+        if !rest.is_empty() {
+            return rest.join("/");
         }
-    };
-    rel.components()
-        .filter_map(|component| match component {
-            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("/")
+    }
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// One suffix per relative path, in the same order.
@@ -59,7 +66,6 @@ pub fn unique_dir_suffixes(relative_paths: &[&str]) -> Vec<String> {
         for &index in indices {
             let dir = &parsed[index].1;
             if dir.is_empty() {
-                suffixes[index] = "./".to_string();
                 continue;
             }
             let mut len = 1usize;
@@ -93,9 +99,7 @@ pub fn tab_labels(relative_paths: &[&str]) -> Vec<TabLabel> {
         .zip(suffixes)
         .map(|(path, suffix)| {
             let (name, dir) = split_rel(path);
-            let relative = if suffix == "./" {
-                format!("./{name}")
-            } else if dir.is_empty() {
+            let relative = if dir.is_empty() {
                 name.clone()
             } else {
                 format!("{}/{name}", dir.join("/"))
@@ -118,6 +122,71 @@ pub fn labeled_name(name: &str, suffix: &str) -> String {
     }
 }
 
+fn looks_windows(path: &Path) -> bool {
+    let raw = path.to_string_lossy();
+    if raw.contains('\\') {
+        return true;
+    }
+    let bytes = raw.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return true;
+    }
+    let lower = raw.to_ascii_lowercase();
+    lower.starts_with("//?/") || lower.starts_with("//./")
+}
+
+fn same_part(left: &str, right: &str, windows: bool) -> bool {
+    if windows {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
+/// `C:\git\onboarder`, `\\?\C:\git\onboarder`, and `//?/UNC/server/share` become
+/// comparable parts. `.` is dropped. The result uses no separators.
+fn normalize_parts(path: &Path) -> Vec<String> {
+    let mut text = path.to_string_lossy().replace('\\', "/");
+    if let Some(rest) = strip_ci(&text, "//?/unc/") {
+        text = format!("//{rest}");
+    } else if let Some(rest) = strip_ci(&text, "//?/") {
+        text = rest.to_string();
+    } else if let Some(rest) = strip_ci(&text, "//./") {
+        text = rest.to_string();
+    }
+    let unc = text.starts_with("//");
+    let mut parts = Vec::new();
+    let mut pieces = text
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".");
+    if unc {
+        if let Some(host) = pieces.next() {
+            parts.push(format!("//{host}"));
+        }
+    }
+    for part in pieces {
+        if part == ".." {
+            let anchored = parts
+                .last()
+                .is_some_and(|last| last.starts_with("//") || last.ends_with(':'));
+            if !anchored {
+                parts.pop();
+            }
+            continue;
+        }
+        parts.push(part.to_string());
+    }
+    parts
+}
+
+fn strip_ci<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    if text.len() >= prefix.len() && text[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        Some(&text[prefix.len()..])
+    } else {
+        None
+    }
+}
+
 fn split_rel(path: &str) -> (String, Vec<String>) {
     let mut parts: Vec<String> = path
         .split(['/', '\\'])
@@ -136,11 +205,61 @@ mod tests {
     #[test]
     fn root_and_a_subfolder_are_told_apart() {
         let suffixes = unique_dir_suffixes(&[".env", "backend/.env"]);
-        assert_eq!(suffixes, vec!["./".to_string(), "backend".to_string()]);
+        assert_eq!(suffixes, vec!["".to_string(), "backend".to_string()]);
         let labels = tab_labels(&[".env", "backend/.env"]);
-        assert_eq!(labels[0].relative, "./.env");
+        assert_eq!(labels[0].suffix, "");
+        assert_eq!(labels[0].relative, ".env");
         assert_eq!(labels[1].relative, "backend/.env");
-        assert_eq!(labeled_name(".env", "./"), ".env · ./");
+        assert_eq!(labeled_name(".env", ""), ".env");
+        assert_eq!(labeled_name(".env", "backend"), ".env · backend");
+    }
+
+    #[test]
+    fn windows_root_and_backend_keep_a_unique_folder() {
+        let root = Path::new(r"C:\git\onboarder");
+        let at_root = relative_slash_path(root, Path::new(r"C:\git\onboarder\.env"));
+        let backend = relative_slash_path(root, Path::new(r"C:\git\onboarder\backend\.env"));
+        assert_eq!(at_root, ".env");
+        assert_eq!(backend, "backend/.env");
+        let labels = tab_labels(&[&at_root, &backend]);
+        assert_eq!(labels[0].suffix, "");
+        assert_eq!(labels[1].suffix, "backend");
+        assert_eq!(labels[0].relative, ".env");
+        assert_eq!(labels[1].relative, "backend/.env");
+    }
+
+    #[test]
+    fn windows_prefix_and_drive_case_still_match_the_root() {
+        let nested = relative_slash_path(
+            Path::new(r"\\?\C:\git\onboarder"),
+            Path::new(r"c:\git\onboarder\backend\.env"),
+        );
+        assert_eq!(nested, "backend/.env");
+        let forward = relative_slash_path(
+            Path::new(r"C:/git/onboarder"),
+            Path::new(r"C:\git\onboarder\backend\.env"),
+        );
+        assert_eq!(forward, "backend/.env");
+        let unc = relative_slash_path(
+            Path::new(r"\\?\UNC\server\share\onboarder"),
+            Path::new(r"\\server\share\onboarder\services\api\src\.env"),
+        );
+        assert_eq!(unc, "services/api/src/.env");
+    }
+
+    #[test]
+    fn windows_deep_folders_drop_the_shared_parent() {
+        let root = Path::new(r"C:\git\onboarder");
+        let api = relative_slash_path(root, Path::new(r"C:\git\onboarder\services\api\src\.env"));
+        let web = relative_slash_path(root, Path::new(r"C:\git\onboarder\services\web\src\.env"));
+        let also = relative_slash_path(root, Path::new(r"\\?\C:\git\onboarder\.env"));
+        assert_eq!(
+            unique_dir_suffixes(&[&api, &web, &also]),
+            vec!["api/src".to_string(), "web/src".to_string(), "".to_string()]
+        );
+        let labels = tab_labels(&[&api, &web, &also]);
+        assert_eq!(labels[0].relative, "services/api/src/.env");
+        assert_eq!(labels[2].relative, ".env");
     }
 
     #[test]
@@ -173,5 +292,13 @@ mod tests {
         assert_eq!(suffixes, vec!["", "", ""]);
         let outside = relative_slash_path(Path::new("/proj"), Path::new("/elsewhere/.env"));
         assert_eq!(outside, ".env");
+        assert_eq!(
+            relative_slash_path(Path::new("/proj"), Path::new("/proj/.env")),
+            ".env"
+        );
+        assert_eq!(
+            relative_slash_path(Path::new("/proj"), Path::new("/proj/backend/.env")),
+            "backend/.env"
+        );
     }
 }

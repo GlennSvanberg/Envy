@@ -68,7 +68,7 @@ pub struct Palette {
 impl Palette {
     pub fn for_mode(dark: bool) -> Self {
         if dark {
-            let accent: Hsla = rgb(0xE5484D).into();
+            let accent: Hsla = rgb(0xF03448).into();
             let warning: Hsla = rgb(0xF59E0B).into();
             Self {
                 bg_canvas: rgb(0x111214).into(),
@@ -88,8 +88,8 @@ impl Palette {
                 fg_tertiary: rgb(0x7B8394).into(),
 
                 accent,
-                accent_hover: rgb(0xF16A6E).into(),
-                accent_fg: rgb(0x1C0A0B).into(),
+                accent_hover: rgb(0xFF5566).into(),
+                accent_fg: rgb(0x1A0708).into(),
                 accent_subtle: accent.opacity(0.11),
                 accent_ring: accent.opacity(0.26),
 
@@ -107,7 +107,7 @@ impl Palette {
                 diff_only_right_bg: warning.opacity(0.035),
             }
         } else {
-            let accent: Hsla = rgb(0xCE2C31).into();
+            let accent: Hsla = rgb(0xE5243B).into();
             let warning_dot: Hsla = rgb(0xD97706).into();
             Self {
                 bg_canvas: rgb(0xFFFFFF).into(),
@@ -127,7 +127,7 @@ impl Palette {
                 fg_tertiary: rgb(0x687080).into(),
 
                 accent,
-                accent_hover: rgb(0xA61B22).into(),
+                accent_hover: rgb(0xC4192E).into(),
                 accent_fg: rgb(0xFFFFFF).into(),
                 accent_subtle: accent.opacity(0.09),
                 accent_ring: accent.opacity(0.28),
@@ -226,8 +226,8 @@ mod tests {
     fn accent_is_the_logo_red_and_status_stays_amber() {
         let dark = Palette::for_mode(true);
         let light = Palette::for_mode(false);
-        assert_eq!(dark.accent, rgb(0xE5484D).into());
-        assert_eq!(light.accent, rgb(0xCE2C31).into());
+        assert_eq!(dark.accent, rgb(0xF03448).into());
+        assert_eq!(light.accent, rgb(0xE5243B).into());
         assert_eq!(dark.danger, dark.accent);
         assert_eq!(light.danger, light.accent);
         assert_ne!(dark.warning, dark.accent);

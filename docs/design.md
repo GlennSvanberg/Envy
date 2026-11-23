@@ -7,7 +7,7 @@ Design specification and token reference for Envy, a keyboard-first desktop edit
 ## 1. Design Principles
 
 1. **Calm, architectural craft.** Modeled on tools like Zed, Linear, and Raycast. Clear surface hierarchy, hairline borders, quiet chrome, and high-contrast data. No decorative gradients, no glow effects, no emoji, and no thick left-border accent bars.
-2. **One accent, used sparingly.** Logo red (`#E5484D` in dark mode, `#CE2C31` in light mode) is the single brand accent. It marks active focus, active selection, the active file tab, pinned projects, search matches, and destructive actions such as Delete. Status stays amber, so a missing-key notice or a disk change does not look like the accent.
+2. **One accent, used sparingly.** Logo red (`#F03448` in dark mode, `#E5243B` in light mode) is the single brand accent. It marks active focus, active selection, the active file tab, pinned projects, search matches, and destructive actions such as Delete. Status stays amber, so a missing-key notice or a disk change does not look like the accent.
 3. **Strict 4 / 8 px spatial rhythm.** Every container height, gap, padding, and corner radius sits on a 4 px grid (with 1–2 px reserved exclusively for hairlines and micro-indicators).
 4. **Pixel-locked alignment.** Table headers, data rows, inline editors, and compare columns share identical width constants so opening an edit or toggling an action never shifts surrounding text.
 5. **Effortless keyboard navigation.** Every zone (`Projects`, `Tabs`, `Keys`) has clear, quiet visual focus feedback, automatic scroll-into-view, and concise keycap hints in the footer.
@@ -30,7 +30,7 @@ Envy separates **chrome** (title bar, sidebar, tab strip, footer) from the **can
 | `bg.kbd` | `#202228` | `#ECEEF2` | Keycap badges and neutral summary chips |
 | `bg.hover` | `#1E2127` | `#EEF0F4` | Row hover, tab hover, ghost button hover |
 | `bg.selected_muted` | `#1E2127` | `#E8EBF0` | Selected row when its zone is not focused |
-| `bg.selected_accent` | `#E5484D` @ 9% | `#CE2C31` @ 8% | Quiet tint for the selected row in the focused zone |
+| `bg.selected_accent` | `#F03448` @ 9% | `#E5243B` @ 8% | Quiet tint for the selected row in the focused zone |
 | `border.hairline` | `#23262C` | `#E4E7EC` | Pane dividers, bar separators, table headers |
 | `border.control` | `#2F333C` | `#CFD5DF` | Inputs, keycaps, outline buttons, modal borders |
 | `backdrop` | `#090A0C` @ 64% | `#111318` @ 32% | Modal overlay scrim |
@@ -47,17 +47,17 @@ Envy separates **chrome** (title bar, sidebar, tab strip, footer) from the **can
 
 | Token | Dark | Light | Usage |
 | --- | --- | --- | --- |
-| `accent` | `#E5484D` | `#CE2C31` | Active tab underline, pinned star, primary button, active toggles, search highlight, Delete |
-| `accent.ring` | `#E5484D` @ 26% | `#CE2C31` @ 28% | Quiet 1 px focused-row hairline, active toggle border, input focus border |
-| `accent.subtle` | `#E5484D` @ 11% | `#CE2C31` @ 9% | Active/toggled icon button fill, primary icon well, compare badges |
+| `accent` | `#F03448` | `#E5243B` | Active tab underline, pinned star, primary button, active toggles, search highlight, Delete |
+| `accent.ring` | `#F03448` @ 26% | `#E5243B` @ 28% | Quiet 1 px focused-row hairline, active toggle border, input focus border |
+| `accent.subtle` | `#F03448` @ 11% | `#E5243B` @ 9% | Active/toggled icon button fill, primary icon well, compare badges |
 | `status.warning` | `#F59E0B` | `#B45309` | Missing-vs-example pill, diff-changed and right-only glyphs, disk-change banner |
 | `status.warning_dot` | `#F59E0B` | `#D97706` | Production file dot and missing-keys drift indicator |
 | `status.warning_bg` | `#F59E0B` @ 9% | `#D97706` @ 9% | Missing-vs-example pill and disk-change banner background |
 | `status.warning_border` | `#F59E0B` @ 22% | `#D97706` @ 22% | Missing-vs-example pill and disk-change banner border |
 | `status.prod` | `#F59E0B` | `#D97706` | 6 px production file marker dot |
-| `status.danger` | `#E5484D` | `#CE2C31` | Same red as `accent`. Delete confirmation and the Delete menu item |
-| `status.danger_bg` | `#E5484D` @ 10% | `#CE2C31` @ 8% | Delete button fill |
-| `status.danger_border` | `#E5484D` @ 24% | `#CE2C31` @ 22% | Delete button border |
+| `status.danger` | `#F03448` | `#E5243B` | Same red as `accent`. Delete confirmation and the Delete menu item |
+| `status.danger_bg` | `#F03448` @ 10% | `#E5243B` @ 8% | Delete button fill |
+| `status.danger_border` | `#F03448` @ 24% | `#E5243B` @ 22% | Delete button border |
 
 ### 2.4 Compare Row Tints
 
@@ -67,7 +67,7 @@ Equal rows stay completely plain (transparent). Differing rows receive only a wh
 | --- | --- | --- | --- | --- |
 | `Same` | `Equal` | `fg.tertiary` | transparent | transparent |
 | `Different` | `EqualNot` | `status.warning` | `#F59E0B` @ 4.5% | `#D97706` @ 5% |
-| `OnlyLeft` | `Plus` | `accent` | `#E5484D` @ 3.5% | `#CE2C31` @ 3.5% |
+| `OnlyLeft` | `Plus` | `accent` | `#F03448` @ 3.5% | `#E5243B` @ 3.5% |
 | `OnlyRight` | `Minus` | `status.warning` | `#F59E0B` @ 3.5% | `#D97706` @ 3.5% |
 
 ---
@@ -152,9 +152,9 @@ Two font families only:
   - **Inactive tab:** Transparent background, `fg.secondary`, hover fill `bg.hover` with `fg.primary`.
   - **Keyboard focus (`zone == Zone::Tabs`):** The focused cursor tab displays a crisp `1 px` `accent.ring` outline and subtle `accent.subtle` fill.
   - **Indicators:**
-    - Production file: `6 px` red dot (`status.prod`) before the filename.
+    - Production file: `6 px` amber dot (`status.prod`) before the filename.
     - Missing keys vs `.env.example`: subtle `5 px` amber dot (`status.warning_dot` @ 65%) after the filename with tooltip `"Missing keys vs .env.example"`.
-    - **Same filename:** The filename stays. A muted suffix (`11 px`, normal weight, `fg.tertiary`, at most `96 px`) shows the shortest unique trailing directories (`backend`, `api/src`). A file in the project root shows `./` only when another file has the same name. The tooltip starts with the project-relative path (`backend/.env · Ctrl+click to compare`). Compare headers, the Copy from row, and `Delete {path}?` use the same distinction.
+    - **Same filename:** The filename stays. A muted suffix (`11 px`, normal weight, `fg.tertiary`, at most `96 px`) shows the shortest unique trailing directories (`backend`, `api/src`). A file in the project root has no suffix. The tooltip starts with the project-relative path (`backend/.env` or `.env`, then `Ctrl+click to compare`). Compare headers, the Copy from row, and `Delete {path}?` use the same distinction.
 
 ### 5.3 Workspace Toolbar
 - Height `40 px`, `px(12 px)`, `bg.canvas`, `border_b_1` (`border.hairline`), `items_center`, `justify_between`.
