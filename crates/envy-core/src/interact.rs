@@ -142,6 +142,22 @@ pub fn search_landing(selected: Option<usize>, visible: &[usize]) -> Option<usiz
         .or_else(|| visible.first().copied())
 }
 
+/// Row to mark while a search field is focused.
+///
+/// A query marks the first visible hit and does not change which row is open.
+/// An empty query keeps the current selection when it is still in the list.
+pub fn search_mark(
+    query_active: bool,
+    selected: Option<usize>,
+    visible: &[usize],
+) -> Option<usize> {
+    if query_active {
+        visible.first().copied()
+    } else {
+        search_landing(selected, visible)
+    }
+}
+
 pub fn is_cell_commit_key(key: &str) -> bool {
     matches!(key, "enter" | "kp_enter" | "numpadenter")
 }
@@ -299,6 +315,10 @@ mod tests {
         assert_eq!(search_landing(None, &[3, 4]), Some(3));
         assert_eq!(search_landing(Some(5), &[0, 1]), Some(0));
         assert_eq!(search_landing(Some(1), &[]), None);
+        assert_eq!(search_mark(true, Some(7), &[4, 7, 9]), Some(4));
+        assert_eq!(search_mark(false, Some(7), &[4, 7, 9]), Some(7));
+        assert_eq!(search_mark(false, Some(1), &[4, 7]), Some(4));
+        assert_eq!(search_mark(true, Some(4), &[]), None);
         assert_eq!(step_index(0, TAB_MENU_LEN, -1), 0);
         assert_eq!(step_index(0, TAB_MENU_LEN, 1), 1);
         assert_eq!(

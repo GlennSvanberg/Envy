@@ -62,8 +62,8 @@ pub use document::{
 pub use hotkey::{Hotkey, HotkeyError};
 pub use interact::{
     enter_while_suggesting, is_cell_commit_key, route_cell_edit, route_value_edit, row_click,
-    search_landing, step_index, CellMotion, CellRoute, EditCell, EnterEffect, RowClick, RowTarget,
-    ValueMotion, ValueRoute, TAB_MENU_LEN,
+    search_landing, search_mark, step_index, CellMotion, CellRoute, EditCell, EnterEffect,
+    RowClick, RowTarget, ValueMotion, ValueRoute, TAB_MENU_LEN,
 };
 pub use labels::{labeled_name, relative_slash_path, tab_labels, unique_dir_suffixes, TabLabel};
 pub use names::{

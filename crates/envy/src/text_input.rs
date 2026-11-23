@@ -53,8 +53,12 @@ actions!(
 );
 
 pub fn bind(cx: &mut App) {
+    cx.bind_keys(key_bindings());
+}
+
+pub(crate) fn key_bindings() -> Vec<KeyBinding> {
     let field = Some("EnvyText");
-    cx.bind_keys([
+    vec![
         KeyBinding::new("left", CaretLeft, field),
         KeyBinding::new("right", CaretRight, field),
         KeyBinding::new("ctrl-left", CaretWordLeft, field),
@@ -96,7 +100,15 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("enter", CaretSubmit, field),
         KeyBinding::new("kp_enter", CaretSubmit, field),
         KeyBinding::new("numpadenter", CaretSubmit, field),
-    ]);
+    ]
+}
+
+/// Find a project, Find a key, and the new-file name.
+///
+/// Both names have to live in one context. A second `key_context` call
+/// replaces the first, and without `EnvyText` the list shortcuts stay active.
+pub(crate) fn search_field_key_context() -> &'static str {
+    "EnvyText EnvyExitDown"
 }
 
 #[derive(Clone, Debug)]
@@ -919,10 +931,12 @@ impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_focus(window, cx);
         let entity = cx.entity();
-        let mut field = div().size_full().min_w(px(0.)).key_context("EnvyText");
-        if self.exit_down {
-            field = field.key_context("EnvyExitDown");
-        }
+        let context = if self.exit_down {
+            search_field_key_context()
+        } else {
+            "EnvyText"
+        };
+        let field = div().size_full().min_w(px(0.)).key_context(context);
         field
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)
@@ -959,5 +973,100 @@ impl Render for TextInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .child(TextElement { input: entity })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::search_field_key_context;
+    use gpui_kit::{KeyContext, Keymap, Keystroke};
+
+    fn search_keymap() -> Keymap {
+        let mut keymap = Keymap::new(crate::actions::key_bindings());
+        keymap.add_bindings(super::key_bindings());
+        keymap
+    }
+
+    fn field_stack() -> [KeyContext; 2] {
+        [
+            KeyContext::parse("Envy").unwrap(),
+            KeyContext::parse(search_field_key_context()).unwrap(),
+        ]
+    }
+
+    fn type_transformer(label: &str) {
+        let keymap = search_keymap();
+        let stack = field_stack();
+        let mut text = String::new();
+        for key in ["t", "r", "a", "n", "s", "f", "o", "r", "m", "e", "r"] {
+            let stroke = Keystroke::parse(key).unwrap();
+            let (bindings, _) = keymap.bindings_for_input(std::slice::from_ref(&stroke), &stack);
+            if let Some(binding) = bindings.first() {
+                panic!(
+                    "{label}: {key:?} ran {} and left the field; text is {text:?}",
+                    binding.action().name()
+                );
+            }
+            text.push_str(key);
+        }
+        assert_eq!(text, "transformer", "{label}");
+
+        let down = Keystroke::parse("down").unwrap();
+        let (bindings, _) = keymap.bindings_for_input(std::slice::from_ref(&down), &stack);
+        let name = bindings
+            .first()
+            .map(|binding| binding.action().name().to_string())
+            .unwrap_or_default();
+        assert!(
+            name.contains("CaretExitDown"),
+            "{label}: Down should enter the list, got {name}"
+        );
+
+        let enter = Keystroke::parse("enter").unwrap();
+        let (bindings, _) = keymap.bindings_for_input(std::slice::from_ref(&enter), &stack);
+        let name = bindings
+            .first()
+            .map(|binding| binding.action().name().to_string())
+            .unwrap_or_default();
+        assert!(
+            name.contains("CaretSubmit"),
+            "{label}: Enter should open the marked hit, got {name}"
+        );
+    }
+
+    #[test]
+    fn typing_transformer_stays_in_find_a_project() {
+        type_transformer("Find a project");
+    }
+
+    #[test]
+    fn typing_transformer_stays_in_find_a_key() {
+        type_transformer("Find a key");
+    }
+
+    #[test]
+    fn a_search_field_without_envy_text_lets_n_open_a_new_key() {
+        let keymap = search_keymap();
+        let broken = [
+            KeyContext::parse("Envy").unwrap(),
+            KeyContext::parse("EnvyExitDown").unwrap(),
+        ];
+        let stroke = Keystroke::parse("n").unwrap();
+        let (bindings, _) = keymap.bindings_for_input(std::slice::from_ref(&stroke), &broken);
+        let name = bindings
+            .first()
+            .map(|binding| binding.action().name().to_string())
+            .unwrap_or_default();
+        assert!(
+            name.contains("NewKey"),
+            "dropping EnvyText should let n open Add key, got {name}"
+        );
+    }
+
+    #[test]
+    fn search_field_context_keeps_text_and_down() {
+        let context = KeyContext::parse(search_field_key_context()).unwrap();
+        assert!(context.contains("EnvyText"));
+        assert!(context.contains("EnvyExitDown"));
     }
 }

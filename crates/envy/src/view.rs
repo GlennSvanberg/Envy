@@ -21,9 +21,9 @@ use envy_core::{
     is_cell_commit_key, is_env_key, labeled_name, load_index_cache, match_span,
     native_project_path, next_env_filename, plan_paste, projects_from_cache, relative_slash_path,
     rename_env_file, route_cell_edit, row_click, save_index_cache, save_text, scan_paths,
-    search_field_inset, search_landing, sidebar_path_chars, sidebar_rank, step_index, suggest_keys,
-    tab_labels, truncate_path_head, upsert_file, CellMotion, Config, CopyValues, Deeplink,
-    EditCell, EditorView, EnterEffect, EnvDocument, EnvFile, EnvFileNameError, FoundEnv,
+    search_field_inset, search_landing, search_mark, sidebar_path_chars, sidebar_rank, step_index,
+    suggest_keys, tab_labels, truncate_path_head, upsert_file, CellMotion, Config, CopyValues,
+    Deeplink, EditCell, EditorView, EnterEffect, EnvDocument, EnvFile, EnvFileNameError, FoundEnv,
     KeySuggestion, OpenFile, PathStyle, Project, RowClick, RowTarget, ScanError, ThemeSetting,
     KEY_CELL_GAP_PX, KEY_CELL_PAD_RIGHT_PX, KEY_LINE_PX, KEY_RELATED_ICON_PX, KEY_RELATED_PAD_PX,
     KEY_TEXT_PX, KEY_TOGGLE_W_PX, SEARCH_BAND_BORDER_PX, SEARCH_BAND_H_PX, SEARCH_FIELD_H_PX,
@@ -177,6 +177,8 @@ pub struct EnvyApp {
     diff_scroll: ScrollHandle,
     project_filter: Entity<TextInput>,
     filter_query: String,
+    /// Sidebar row highlighted after Down, before Enter opens that project.
+    project_mark: Option<usize>,
     key_filter: Entity<TextInput>,
     key_query: String,
     editor_view: EditorView,
@@ -312,6 +314,7 @@ impl EnvyApp {
             diff_scroll: ScrollHandle::new(),
             project_filter,
             filter_query: String::new(),
+            project_mark: None,
             key_filter,
             key_query: String::new(),
             editor_view: EditorView::Table,
@@ -498,8 +501,11 @@ impl EnvyApp {
             |this, state, event, window, cx| match event {
                 TextInputEvent::Change => {
                     this.focus_project_on_open = false;
+                    this.project_mark = None;
                     this.filter_query = state.read(cx).value().to_string();
-                    this.scroll_project_into_view();
+                    if let Some(index) = this.marked_project(true) {
+                        this.scroll_project_index(index);
+                    }
                     cx.notify();
                 }
                 TextInputEvent::Submit => {
@@ -518,16 +524,30 @@ impl EnvyApp {
             window,
             |this, state, event, window, cx| match event {
                 TextInputEvent::Change => {
+                    this.focus_project_on_open = false;
                     this.key_query = state.read(cx).value().to_string();
                     let len = this.visible_entry_nodes().len();
-                    if this.cursor >= len {
+                    if !this.key_query.trim().is_empty() {
                         this.cursor = 0;
+                    } else if this.cursor >= len {
+                        this.cursor = 0;
+                    }
+                    if let Some(&item_ix) = this.visible_layout().entry_positions.get(this.cursor) {
+                        this.key_scroll.scroll_to_item(item_ix);
                     }
                     cx.notify();
                 }
                 TextInputEvent::Submit => {
+                    this.focus_project_on_open = false;
+                    let len = this.visible_entry_nodes().len();
+                    if !this.key_query.trim().is_empty() && len > 0 {
+                        this.cursor = 0;
+                    }
                     this.zone = Zone::Keys;
-                    this.focus_self(window, cx);
+                    this.begin_value_edit(window, cx);
+                    if this.editor.is_none() {
+                        this.focus_self(window, cx);
+                    }
                     cx.notify();
                 }
                 TextInputEvent::ExitDown => this.leave_search(Zone::Keys, window, cx),
@@ -912,6 +932,7 @@ impl EnvyApp {
         if index >= self.projects.len() {
             return;
         }
+        self.project_mark = None;
         let changed = self.project_ix != Some(index);
         self.project_ix = Some(index);
         self.file_ix = default_file_index(&self.projects[index]);
@@ -977,10 +998,34 @@ impl EnvyApp {
         let Some(index) = self.project_ix else {
             return;
         };
+        self.scroll_project_index(index);
+    }
+
+    fn scroll_project_index(&self, index: usize) {
         let Some(position) = self.project_visual_index(index) else {
             return;
         };
         self.project_scroll.scroll_to_item(position);
+    }
+
+    /// Row the sidebar paints as selected.
+    ///
+    /// Typing marks the first hit and leaves the open project alone. Down
+    /// keeps that hit highlighted until Enter opens it.
+    fn marked_project(&self, filter_focused: bool) -> Option<usize> {
+        let visible = self.visible_project_indexes();
+        let query_active = !self.filter_query.trim().is_empty();
+        if filter_focused {
+            return search_mark(query_active, self.project_ix, &visible);
+        }
+        if self.zone == Zone::Projects {
+            if let Some(mark) = self.project_mark {
+                if visible.contains(&mark) {
+                    return Some(mark);
+                }
+            }
+        }
+        self.project_ix.filter(|index| visible.contains(index))
     }
 
     /// Child index in the project list, counting the section headers.
@@ -1260,15 +1305,11 @@ impl EnvyApp {
     }
 
     fn open_filtered_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let visible = self.visible_project_indexes();
-        let index = self
-            .project_ix
-            .filter(|index| visible.contains(index))
-            .or_else(|| visible.first().copied());
-        if let Some(index) = index {
-            self.remember_project(index, cx);
-            self.select_project(index, true, window, cx);
-        }
+        let Some(index) = self.marked_project(true) else {
+            return;
+        };
+        self.remember_project(index, cx);
+        self.select_project(index, true, window, cx);
     }
 
     fn leave_search(&mut self, which: Zone, window: &mut Window, cx: &mut Context<Self>) {
@@ -1289,13 +1330,13 @@ impl EnvyApp {
             }
             Zone::Projects | Zone::Tabs => {
                 self.zone = Zone::Projects;
-                let visible = self.visible_project_indexes();
-                if let Some(index) = search_landing(self.project_ix, &visible) {
-                    self.select_project(index, false, window, cx);
-                } else {
-                    self.focus_self(window, cx);
-                    cx.notify();
+                let marked = self.marked_project(true);
+                self.project_mark = marked.filter(|index| self.project_ix != Some(*index));
+                if let Some(index) = marked {
+                    self.scroll_project_index(index);
                 }
+                self.focus_self(window, cx);
+                cx.notify();
             }
         }
     }
@@ -1304,6 +1345,7 @@ impl EnvyApp {
         if !matches!(self.overlay, Overlay::None) || self.editor.is_some() {
             return;
         }
+        self.project_mark = None;
         let handle = if self.zone == Zone::Projects {
             self.project_filter.focus_handle(cx)
         } else {
@@ -1783,18 +1825,29 @@ impl EnvyApp {
         window.focus(&self.focus, cx);
     }
 
-    /// Put the caret in Find a project. A restored file must not take it.
+    /// Put the caret in Find a project. A restored file must not take it,
+    /// and neither may a search field the user is already typing in.
     fn hold_open_focus(&mut self, cx: &mut Context<Self>) {
         if !self.focus_project_on_open {
             return;
         }
-        self.zone = Zone::Projects;
-        let handle = self.project_filter.focus_handle(cx);
+        let project = self.project_filter.focus_handle(cx);
+        let keys = self.key_filter.focus_handle(cx);
+        let mut leave_keys = false;
         self.window
             .update(cx, |_, window, cx| {
-                window.focus(&handle, cx);
+                if keys.is_focused(window) {
+                    leave_keys = true;
+                    return;
+                }
+                window.focus(&project, cx);
             })
             .ok();
+        if leave_keys {
+            self.focus_project_on_open = false;
+            return;
+        }
+        self.zone = Zone::Projects;
     }
 
     fn close_editor(&mut self) {
@@ -2116,8 +2169,8 @@ impl EnvyApp {
                     }
                     return;
                 }
-                let current = self
-                    .project_ix
+                let anchor = self.marked_project(false);
+                let current = anchor
                     .and_then(|index| visible.iter().position(|item| *item == index))
                     .map(|position| position as isize)
                     .unwrap_or(-1);
@@ -2126,7 +2179,15 @@ impl EnvyApp {
                     return;
                 }
                 let next_pos = (current + delta).clamp(0, visible.len() as isize - 1) as usize;
-                self.select_project(visible[next_pos], false, window, cx);
+                let next = visible[next_pos];
+                if self.project_mark.is_some() {
+                    self.project_mark = Some(next);
+                    self.scroll_project_index(next);
+                    self.focus_self(window, cx);
+                    cx.notify();
+                } else {
+                    self.select_project(next, false, window, cx);
+                }
             }
             Zone::Tabs => {
                 if delta > 0 {
@@ -2216,12 +2277,7 @@ impl EnvyApp {
         }
         match self.zone {
             Zone::Projects => {
-                let visible = self.visible_project_indexes();
-                let index = self
-                    .project_ix
-                    .filter(|index| visible.contains(index))
-                    .or_else(|| visible.first().copied());
-                if let Some(index) = index {
+                if let Some(index) = self.marked_project(false) {
                     self.remember_project(index, cx);
                     self.select_project(index, true, window, cx);
                 }
@@ -2337,6 +2393,11 @@ impl EnvyApp {
 
     fn begin_new_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.list_keys_blocked() {
+            return;
+        }
+        if self.filter_focused(Zone::Projects, window, cx)
+            || self.filter_focused(Zone::Keys, window, cx)
+        {
             return;
         }
         if self.open.is_none() {
@@ -4382,17 +4443,26 @@ impl Render for EnvyApp {
         }
 
         if self.focus_project_on_open {
-            self.zone = Zone::Projects;
-            let handle = self.project_filter.focus_handle(cx);
-            if !handle.is_focused(window) {
-                cx.defer_in(window, |this, window, cx| {
-                    if !this.focus_project_on_open {
-                        return;
-                    }
-                    this.zone = Zone::Projects;
-                    let handle = this.project_filter.focus_handle(cx);
-                    window.focus(&handle, cx);
-                });
+            let typing_keys = self.filter_focused(Zone::Keys, window, cx);
+            let typing_projects = self.filter_focused(Zone::Projects, window, cx);
+            if typing_keys {
+                self.focus_project_on_open = false;
+            } else if !typing_projects {
+                self.zone = Zone::Projects;
+                let handle = self.project_filter.focus_handle(cx);
+                if !handle.is_focused(window) {
+                    cx.defer_in(window, |this, window, cx| {
+                        if !this.focus_project_on_open
+                            || this.filter_focused(Zone::Keys, window, cx)
+                            || this.filter_focused(Zone::Projects, window, cx)
+                        {
+                            return;
+                        }
+                        this.zone = Zone::Projects;
+                        let handle = this.project_filter.focus_handle(cx);
+                        window.focus(&handle, cx);
+                    });
+                }
             }
         }
 
@@ -4475,10 +4545,10 @@ impl EnvyApp {
     ) -> gpui_kit::Div {
         let project_rows = self.projects.clone();
         let visible_projects = self.visible_project_indexes();
-        let project_ix = self.project_ix;
+        let filter_focused = self.filter_focused(Zone::Projects, window, cx);
+        let marked_project = self.marked_project(filter_focused);
         let zone = self.zone;
-        let list_focused =
-            zone == Zone::Projects && !self.filter_focused(Zone::Projects, window, cx);
+        let list_focused = zone == Zone::Projects && !filter_focused;
         let entity = cx.entity();
 
         let count_text = if self.scanning {
@@ -4638,7 +4708,7 @@ impl EnvyApp {
         let mut last_favorite: Option<bool> = None;
         for (visible_ix, index) in visible_projects.iter().copied().enumerate() {
             let project = &project_rows[index];
-            let selected = project_ix == Some(index);
+            let selected = marked_project == Some(index);
             let favorite = self.config.is_favorite(&project.root);
             if last_favorite != Some(favorite) {
                 project_list = project_list.child(sidebar_section(

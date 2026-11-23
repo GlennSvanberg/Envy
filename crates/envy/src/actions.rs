@@ -40,11 +40,16 @@ actions!(
 );
 
 pub fn bind(cx: &mut gpui_kit::App) {
-    // Letter and editing keys stay out of a text field. The field's context is
-    // `Input`, which sits above `Envy` while it is focused.
-    // `Input` is the plain-text editor. `EnvyText` is every single-line field.
+    cx.bind_keys(key_bindings());
+}
+
+pub(crate) fn key_bindings() -> Vec<KeyBinding> {
+    // Letter and editing keys stay out of a text field. `Input` is the
+    // plain-text editor. `EnvyText` is every single-line field, including
+    // Find a project and Find a key. Those fields also set `EnvyExitDown`
+    // in the same context; replacing `EnvyText` lets these letters through.
     let list = Some("Envy && !Input && !EnvyText");
-    cx.bind_keys([
+    vec![
         KeyBinding::new("j", MoveDown, list),
         KeyBinding::new("down", MoveDown, list),
         KeyBinding::new("k", MoveUp, list),
@@ -87,5 +92,5 @@ pub fn bind(cx: &mut gpui_kit::App) {
         KeyBinding::new("ctrl-,", OpenSettings, Some("Envy")),
         KeyBinding::new("r", ReloadExternal, list),
         KeyBinding::new("ctrl-v", PasteBlock, list),
-    ]);
+    ]
 }
