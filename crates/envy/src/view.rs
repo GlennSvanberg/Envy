@@ -16,16 +16,17 @@ use envy_core::document::{LayoutItem, Node, UnreadableLine};
 use envy_core::paste::{PasteChange, PastePlan};
 use envy_core::{
     abbreviate_home, attach_git_identity, cache_from_projects, check_env_filename,
-    clamp_key_column_px, clamp_sidebar_px, diff, enter_while_suggesting, fill_key_index,
-    fitted_key_column_px, from_example, host_path_style, is_cell_commit_key, is_env_key,
-    load_index_cache, match_span, native_project_path, next_env_filename, plan_paste,
-    projects_from_cache, rename_env_file, route_cell_edit, row_click, save_index_cache, save_text,
-    scan_paths, sidebar_path_chars, sidebar_rank, suggest_keys, truncate_path_head, upsert_file,
-    CellMotion, Config, Deeplink, EditCell, EditorView, EnterEffect, EnvDocument, EnvFile,
+    clamp_key_column_px, clamp_sidebar_px, copied_document, copy_source_order, copy_values_for,
+    diff, enter_while_suggesting, fill_key_index, fitted_key_column_px, host_path_style,
+    is_cell_commit_key, is_env_key, load_index_cache, match_span, native_project_path,
+    next_env_filename, plan_paste, projects_from_cache, rename_env_file, route_cell_edit,
+    row_click, save_index_cache, save_text, scan_paths, search_landing, sidebar_path_chars,
+    sidebar_rank, step_index, suggest_keys, truncate_path_head, upsert_file, CellMotion, Config,
+    CopyValues, Deeplink, EditCell, EditorView, EnterEffect, EnvDocument, EnvFile,
     EnvFileNameError, FoundEnv, KeySuggestion, OpenFile, PathStyle, Project, RowClick, RowTarget,
     ScanError, ThemeSetting, KEY_CELL_GAP_PX, KEY_CELL_PAD_RIGHT_PX, KEY_LINE_PX,
     KEY_RELATED_ICON_PX, KEY_RELATED_PAD_PX, KEY_TEXT_PX, KEY_TOGGLE_W_PX, TAB_DOT_PX, TAB_GAP_PX,
-    TAB_H_PX, TAB_LINE_PX, TAB_PAD_X_PX, TAB_TEXT_PX, VALUE_PAD_RIGHT_PX,
+    TAB_H_PX, TAB_LINE_PX, TAB_MENU_LEN, TAB_PAD_X_PX, TAB_TEXT_PX, VALUE_PAD_RIGHT_PX,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -92,6 +93,12 @@ enum Overlay {
     Paste(PastePlan),
     Shortcuts,
     Unreadable,
+    DeleteFile { file_ix: usize, name: String },
+}
+
+struct TabMenu {
+    file_ix: usize,
+    cursor: usize,
 }
 
 enum FilePrompt {
@@ -99,14 +106,22 @@ enum FilePrompt {
     Create {
         input: Entity<TextInput>,
         error: Option<String>,
-        /// Fill the new file from `.env.example` instead of leaving it empty.
-        from_example: bool,
+        /// `0` is an empty file. `1..` indexes [`copy_source_order`].
+        source: usize,
+        /// Used for a non-example source. Example files always keep their values.
+        keys_only: bool,
+        source_focus: bool,
     },
     Rename {
         file_ix: usize,
         input: Entity<TextInput>,
         error: Option<String>,
     },
+}
+
+enum NewFileBody {
+    Empty,
+    Copy { source: PathBuf, values: CopyValues },
 }
 
 #[derive(Clone, Copy)]
@@ -202,6 +217,7 @@ pub struct EnvyApp {
     pending_key: Option<String>,
     file_prompt: FilePrompt,
     file_prompt_sub: Option<Subscription>,
+    tab_menu: Option<TabMenu>,
     sidebar_width: f32,
     /// `None` until the divider is dragged. The column then fits the longest key.
     key_column_width: Option<f32>,
@@ -231,6 +247,10 @@ enum IoJob {
         epoch: u64,
         path: PathBuf,
     },
+    Delete {
+        path: PathBuf,
+        name: String,
+    },
     Quit,
 }
 
@@ -243,8 +263,8 @@ impl EnvyApp {
     ) -> Self {
         let folder_input = cx.new(|cx| TextInput::new("Folder path", cx));
         let hotkey_input = cx.new(|cx| TextInput::new("ctrl+alt+e", cx));
-        let project_filter = cx.new(|cx| TextInput::new("Find a project", cx));
-        let key_filter = cx.new(|cx| TextInput::new("Find a key", cx));
+        let project_filter = cx.new(|cx| TextInput::new("Find a project", cx).exit_down());
+        let key_filter = cx.new(|cx| TextInput::new("Find a key", cx).exit_down());
         let text_editor = cx.new(|cx| {
             let mut state = EditorState::new(window, cx)
                 .line_number(true)
@@ -328,6 +348,7 @@ impl EnvyApp {
             pending_key: None,
             file_prompt: FilePrompt::None,
             file_prompt_sub: None,
+            tab_menu: None,
             sidebar_width: SIDEBAR_W.as_f32(),
             key_column_width: None,
             resize_drag: None,
@@ -473,6 +494,7 @@ impl EnvyApp {
                 TextInputEvent::Submit => {
                     this.open_filtered_project(window, cx);
                 }
+                TextInputEvent::ExitDown => this.leave_search(Zone::Projects, window, cx),
                 TextInputEvent::Focus | TextInputEvent::Blur => {}
             },
         ));
@@ -493,6 +515,7 @@ impl EnvyApp {
                     this.focus_self(window, cx);
                     cx.notify();
                 }
+                TextInputEvent::ExitDown => this.leave_search(Zone::Keys, window, cx),
                 TextInputEvent::Focus | TextInputEvent::Blur => {}
             },
         ));
@@ -998,6 +1021,12 @@ impl EnvyApp {
     }
 
     fn on_left(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.nudge_copy_mode(true, cx) {
+            return;
+        }
+        if self.tab_menu.is_some() || !matches!(self.overlay, Overlay::None) {
+            return;
+        }
         match self.zone {
             Zone::Tabs => self.move_tab(-1, cx),
             Zone::Keys | Zone::Projects => self.focus_sidebar(window, cx),
@@ -1005,6 +1034,12 @@ impl EnvyApp {
     }
 
     fn on_right(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.nudge_copy_mode(false, cx) {
+            return;
+        }
+        if self.tab_menu.is_some() || !matches!(self.overlay, Overlay::None) {
+            return;
+        }
         match self.zone {
             Zone::Tabs => self.move_tab(1, cx),
             Zone::Projects => self.focus_tabs(window, cx),
@@ -1218,6 +1253,35 @@ impl EnvyApp {
         if let Some(index) = index {
             self.remember_project(index, cx);
             self.select_project(index, true, window, cx);
+        }
+    }
+
+    fn leave_search(&mut self, which: Zone, window: &mut Window, cx: &mut Context<Self>) {
+        match which {
+            Zone::Keys => {
+                self.zone = Zone::Keys;
+                let len = self.visible_entry_nodes().len();
+                let visible: Vec<usize> = (0..len).collect();
+                let selected = (self.cursor < len).then_some(self.cursor);
+                if let Some(index) = search_landing(selected, &visible) {
+                    self.cursor = index;
+                    if let Some(&item_ix) = self.visible_layout().entry_positions.get(index) {
+                        self.key_scroll.scroll_to_item(item_ix);
+                    }
+                }
+                self.focus_self(window, cx);
+                cx.notify();
+            }
+            Zone::Projects | Zone::Tabs => {
+                self.zone = Zone::Projects;
+                let visible = self.visible_project_indexes();
+                if let Some(index) = search_landing(self.project_ix, &visible) {
+                    self.select_project(index, false, window, cx);
+                } else {
+                    self.focus_self(window, cx);
+                    cx.notify();
+                }
+            }
         }
     }
 
@@ -1451,6 +1515,16 @@ impl EnvyApp {
                     Err(err) => self.status = format!("Reload failed: {err}"),
                 }
             }
+            IoDone::Deleted { name, result } => match result {
+                Ok(()) => {
+                    self.status = format!("Deleted {name}.");
+                    self.begin_scan(true, cx);
+                }
+                Err(_) => {
+                    self.status = "Couldn't delete that file.".into();
+                    self.begin_scan(true, cx);
+                }
+            },
             IoDone::Quit => cx.quit(),
         }
         cx.notify();
@@ -1976,6 +2050,17 @@ impl EnvyApp {
     }
 
     fn move_delta(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(menu) = &mut self.tab_menu {
+            menu.cursor = step_index(menu.cursor, TAB_MENU_LEN, delta);
+            cx.notify();
+            return;
+        }
+        if self.step_create_source(delta, window, cx) {
+            return;
+        }
+        if !matches!(self.overlay, Overlay::None) {
+            return;
+        }
         match self.zone {
             Zone::Projects => {
                 let visible = self.visible_project_indexes();
@@ -2042,6 +2127,9 @@ impl EnvyApp {
     }
 
     fn move_file(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.nudge_copy_mode(delta < 0, cx) || self.tab_menu.is_some() {
+            return;
+        }
         let Some(project) = self.project_ix.and_then(|ix| self.projects.get(ix)) else {
             return;
         };
@@ -2054,6 +2142,14 @@ impl EnvyApp {
     }
 
     fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.activate_tab_menu(window, cx) {
+            return;
+        }
+        if let Overlay::DeleteFile { file_ix, .. } = &self.overlay {
+            let file_ix = *file_ix;
+            self.delete_tab(file_ix, window, cx);
+            return;
+        }
         match &self.overlay {
             Overlay::Paste(_) => {
                 self.apply_overlay_paste(window, cx);
@@ -2065,7 +2161,12 @@ impl EnvyApp {
             }
             Overlay::AddFolder => return,
             Overlay::Settings => return,
+            Overlay::DeleteFile { .. } => return,
             Overlay::None => {}
+        }
+        if self.create_source_focused() {
+            self.commit_file_prompt(window, cx);
+            return;
         }
         match self.zone {
             Zone::Projects => {
@@ -2087,6 +2188,12 @@ impl EnvyApp {
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !matches!(self.overlay, Overlay::None) {
             self.close_overlay(window, cx);
+            return;
+        }
+        if self.tab_menu.is_some() {
+            self.tab_menu = None;
+            self.focus_self(window, cx);
+            cx.notify();
             return;
         }
         if !matches!(self.file_prompt, FilePrompt::None) {
@@ -2165,6 +2272,9 @@ impl EnvyApp {
     }
 
     fn begin_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.list_keys_blocked() {
+            return;
+        }
         let Some(node) = self.selected_node() else {
             return;
         };
@@ -2180,6 +2290,9 @@ impl EnvyApp {
     }
 
     fn begin_new_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.list_keys_blocked() {
+            return;
+        }
         if self.open.is_none() {
             self.status = "Open a file first.".into();
             cx.notify();
@@ -2477,6 +2590,7 @@ impl EnvyApp {
                     TextInputEvent::Submit => {
                         this.apply_cell_motion(CellMotion::NextRow, window, cx);
                     }
+                    TextInputEvent::ExitDown => {}
                     TextInputEvent::Focus | TextInputEvent::Blur => {}
                 },
             ));
@@ -2647,6 +2761,9 @@ impl EnvyApp {
     }
 
     fn copy_selected(&mut self, cx: &mut Context<Self>) {
+        if self.list_keys_blocked() {
+            return;
+        }
         let Some(node) = self.selected_node() else {
             return;
         };
@@ -2790,6 +2907,9 @@ impl EnvyApp {
     }
 
     fn ask_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.list_keys_blocked() {
+            return;
+        }
         let Some(node) = self.selected_node() else {
             return;
         };
@@ -3004,6 +3124,9 @@ impl EnvyApp {
     }
 
     fn toggle_diff(&mut self, cx: &mut Context<Self>) {
+        if self.list_keys_blocked() {
+            return;
+        }
         if self.diff_open {
             self.clear_compare();
             cx.notify();
@@ -3042,36 +3165,6 @@ impl EnvyApp {
         self.diff_right = Some(next);
         self.load_diff(cx);
         cx.notify();
-    }
-
-    fn new_from_example(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self
-            .project_ix
-            .and_then(|ix| self.projects.get(ix))
-            .is_none()
-        {
-            self.status = "Open a project first.".into();
-            cx.notify();
-            return;
-        }
-        if self.example_path().is_none() {
-            self.status = "This project has no .env.example.".into();
-            cx.notify();
-            return;
-        }
-        self.open_new_file_prompt(true, window, cx);
-    }
-
-    fn example_path(&self) -> Option<PathBuf> {
-        self.project_ix
-            .and_then(|ix| self.projects.get(ix))
-            .and_then(|project| {
-                project
-                    .files
-                    .iter()
-                    .find(|file| is_example_filename(&file.name))
-                    .map(|file| file.path.clone())
-            })
     }
 
     fn file_prompt_input(&self) -> Option<&Entity<TextInput>> {
@@ -3142,7 +3235,19 @@ impl EnvyApp {
                         this.clear_file_prompt_error();
                         cx.notify();
                     }
-                    TextInputEvent::Focus | TextInputEvent::Blur => {}
+                    TextInputEvent::ExitDown => {
+                        if let FilePrompt::Create { source_focus, .. } = &mut this.file_prompt {
+                            *source_focus = true;
+                        }
+                        this.focus_self(window, cx);
+                        cx.notify();
+                    }
+                    TextInputEvent::Focus => {
+                        if let FilePrompt::Create { source_focus, .. } = &mut this.file_prompt {
+                            *source_focus = false;
+                        }
+                    }
+                    TextInputEvent::Blur => {}
                 }),
             );
         self.file_prompt = prompt;
@@ -3160,25 +3265,23 @@ impl EnvyApp {
             cx.notify();
             return;
         }
-        self.open_new_file_prompt(false, window, cx);
+        self.open_new_file_prompt(window, cx);
     }
 
-    fn open_new_file_prompt(
-        &mut self,
-        from_example: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn open_new_file_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.editor.is_some() {
             self.commit_editor(None, false, window, cx);
         }
+        self.tab_menu = None;
         let name = next_env_filename(&self.current_file_names());
-        let input = cx.new(|cx| TextInput::new("File name", cx).with_text(name));
+        let input = cx.new(|cx| TextInput::new("File name", cx).with_text(name).exit_down());
         self.open_file_prompt(
             FilePrompt::Create {
                 input,
                 error: None,
-                from_example,
+                source: 0,
+                keys_only: true,
+                source_focus: false,
             },
             window,
             cx,
@@ -3216,25 +3319,294 @@ impl EnvyApp {
             .unwrap_or_default()
     }
 
+    fn list_keys_blocked(&self) -> bool {
+        self.tab_menu.is_some()
+            || !matches!(self.overlay, Overlay::None)
+            || self.create_source_focused()
+    }
+
+    fn create_source_focused(&self) -> bool {
+        matches!(
+            self.file_prompt,
+            FilePrompt::Create {
+                source_focus: true,
+                ..
+            }
+        )
+    }
+
+    fn step_create_source(
+        &mut self,
+        delta: isize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.create_source_focused() {
+            return false;
+        }
+        let count = self.current_file_names().len();
+        let source = match &self.file_prompt {
+            FilePrompt::Create { source, .. } => *source,
+            _ => return false,
+        };
+        if source == 0 && delta < 0 {
+            if let FilePrompt::Create { source_focus, .. } = &mut self.file_prompt {
+                *source_focus = false;
+            }
+            self.focus_file_prompt(window, cx);
+            cx.notify();
+            return true;
+        }
+        let next = step_index(source, count + 1, delta);
+        if let FilePrompt::Create { source, .. } = &mut self.file_prompt {
+            *source = next;
+        }
+        cx.notify();
+        true
+    }
+
+    fn nudge_copy_mode(&mut self, keys_only: bool, cx: &mut Context<Self>) -> bool {
+        if !self.create_source_focused() {
+            return false;
+        }
+        if let Some(name) = self.selected_copy_name() {
+            if !is_example_filename(&name) {
+                if let FilePrompt::Create {
+                    keys_only: mode, ..
+                } = &mut self.file_prompt
+                {
+                    *mode = keys_only;
+                }
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    fn selected_copy_name(&self) -> Option<String> {
+        let FilePrompt::Create { source, .. } = &self.file_prompt else {
+            return None;
+        };
+        if *source == 0 {
+            return None;
+        }
+        let project = self.project_ix.and_then(|ix| self.projects.get(ix))?;
+        let names: Vec<&str> = project
+            .files
+            .iter()
+            .map(|file| file.name.as_str())
+            .collect();
+        let index = copy_source_order(&names).get(source - 1).copied()?;
+        project.files.get(index).map(|file| file.name.clone())
+    }
+
+    fn open_tab_menu(&mut self, file_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let exists = self
+            .project_ix
+            .and_then(|ix| self.projects.get(ix))
+            .is_some_and(|project| file_ix < project.files.len());
+        if !exists {
+            return;
+        }
+        self.close_file_prompt();
+        self.close_editor();
+        self.tab_menu = Some(TabMenu { file_ix, cursor: 0 });
+        self.zone = Zone::Tabs;
+        self.tab_cursor = file_ix;
+        self.focus_self(window, cx);
+        cx.notify();
+    }
+
+    fn close_tab_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tab_menu.is_none() {
+            return;
+        }
+        self.tab_menu = None;
+        self.focus_self(window, cx);
+        cx.notify();
+    }
+
+    fn activate_tab_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(menu) = self.tab_menu.take() else {
+            return false;
+        };
+        match menu.cursor {
+            0 => self.begin_rename_file(menu.file_ix, window, cx),
+            1 => self.duplicate_tab(menu.file_ix, cx),
+            2 => self.reveal_tab(menu.file_ix, cx),
+            _ => self.ask_delete_tab(menu.file_ix, window, cx),
+        }
+        cx.notify();
+        true
+    }
+
+    fn ask_delete_tab(&mut self, file_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = self
+            .project_ix
+            .and_then(|ix| self.projects.get(ix))
+            .and_then(|project| project.files.get(file_ix))
+            .map(|file| file.name.clone())
+        else {
+            return;
+        };
+        self.overlay = Overlay::DeleteFile { file_ix, name };
+        self.focus_self(window, cx);
+        cx.notify();
+    }
+
+    fn delete_tab(&mut self, file_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.overlay = Overlay::None;
+        let Some(path) = self
+            .project_ix
+            .and_then(|ix| self.projects.get(ix))
+            .and_then(|project| project.files.get(file_ix))
+            .map(|file| file.path.clone())
+        else {
+            self.focus_self(window, cx);
+            return;
+        };
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.io_epoch = self.io_epoch.wrapping_add(1);
+        self.io_queue.retain(|job| match job {
+            IoJob::Save { path: saved, .. }
+            | IoJob::Load { path: saved, .. }
+            | IoJob::Reload { path: saved, .. } => saved != &path,
+            _ => true,
+        });
+        if self.open.as_ref().is_some_and(|open| open.path == path) {
+            self.open = None;
+            self.close_editor();
+            self.text_session_before = None;
+            self.text_editor_needs_sync = true;
+        }
+        self.detach_path(&path);
+        if self.file_ix.is_some() {
+            self.load_selected_file(cx);
+        }
+        self.io_queue.push_back(IoJob::Delete { path, name });
+        self.pump_io(cx);
+        self.focus_self(window, cx);
+        cx.notify();
+    }
+
+    fn detach_path(&mut self, path: &Path) {
+        let Some(project) = self.project_ix.and_then(|ix| self.projects.get_mut(ix)) else {
+            return;
+        };
+        let Some(index) = project.files.iter().position(|file| file.path == path) else {
+            return;
+        };
+        project.files.remove(index);
+        let len = project.files.len();
+        self.file_ix = match self.file_ix {
+            Some(ix) if ix == index => {
+                if len == 0 {
+                    None
+                } else {
+                    Some(index.min(len - 1))
+                }
+            }
+            Some(ix) if ix > index => Some(ix - 1),
+            other => other,
+        };
+        self.tab_cursor = self.file_ix.unwrap_or(0);
+        Self::shift_side(&mut self.diff_left, index);
+        Self::shift_side(&mut self.diff_right, index);
+        if self.diff_open && (self.diff_left.is_none() || self.diff_right.is_none()) {
+            self.diff_open = false;
+            self.diff_left = None;
+            self.diff_right = None;
+            self.diff_report = None;
+        }
+    }
+
+    fn shift_side(side: &mut Option<usize>, removed: usize) {
+        match *side {
+            Some(ix) if ix == removed => *side = None,
+            Some(ix) if ix > removed => *side = Some(ix - 1),
+            _ => {}
+        }
+    }
+
+    fn duplicate_tab(&mut self, file_ix: usize, cx: &mut Context<Self>) {
+        let Some(path) = self
+            .project_ix
+            .and_then(|ix| self.projects.get(ix))
+            .and_then(|project| project.files.get(file_ix))
+            .map(|file| file.path.clone())
+        else {
+            return;
+        };
+        let Some(parent) = path.parent().map(|parent| parent.to_path_buf()) else {
+            return;
+        };
+        let name = next_env_filename(&self.current_file_names());
+        let dest = parent.join(&name);
+        let text = self
+            .open
+            .as_ref()
+            .filter(|open| open.path == path)
+            .map(|open| open.document.serialize());
+        cx.spawn(async move |this, async_cx| {
+            let copied = async_cx
+                .background_executor()
+                .spawn(async move {
+                    if let Some(text) = text {
+                        OpenFile::create(&dest, EnvDocument::parse(&text)).map(|_| dest)
+                    } else {
+                        std::fs::copy(&path, &dest).map(|_| dest)
+                    }
+                })
+                .await;
+            let _ = this.update(async_cx, |view, cx| {
+                match copied {
+                    Ok(path) => {
+                        view.pending_file = Some(path);
+                        view.status = format!("Duplicated as {name}.");
+                        view.begin_scan(true, cx);
+                    }
+                    Err(_) => view.status = "Couldn't duplicate that file.".into(),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn reveal_tab(&mut self, file_ix: usize, cx: &mut Context<Self>) {
+        let Some(path) = self
+            .project_ix
+            .and_then(|ix| self.projects.get(ix))
+            .and_then(|project| project.files.get(file_ix))
+            .map(|file| file.path.clone())
+        else {
+            return;
+        };
+        cx.spawn(async move |this, async_cx| {
+            let opened = async_cx
+                .background_executor()
+                .spawn(async move { open_containing_folder(&path) })
+                .await;
+            let _ = this.update(async_cx, |view, cx| {
+                if opened.is_err() {
+                    view.status = "Couldn't show that file.".into();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     fn commit_file_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let names = self.current_file_names();
-        let (creating, from_example, file_ix, text) = match &self.file_prompt {
-            FilePrompt::Create {
-                input,
-                from_example,
-                ..
-            } => (
-                true,
-                *from_example,
-                None,
-                input.read(cx).value().to_string(),
-            ),
-            FilePrompt::Rename { file_ix, input, .. } => (
-                false,
-                false,
-                Some(*file_ix),
-                input.read(cx).value().to_string(),
-            ),
+        let (creating, file_ix, text) = match &self.file_prompt {
+            FilePrompt::Create { input, .. } => (true, None, input.read(cx).value().to_string()),
+            FilePrompt::Rename { file_ix, input, .. } => {
+                (false, Some(*file_ix), input.read(cx).value().to_string())
+            }
             FilePrompt::None => return,
         };
         let ignoring = file_ix.and_then(|index| names.get(index)).cloned();
@@ -3270,33 +3642,11 @@ impl EnvyApp {
             return;
         };
         if creating {
-            let example = self.example_path();
-            let dest_dir = if from_example {
-                let Some(example) = example.as_ref() else {
-                    self.status = "This project has no .env.example.".into();
-                    cx.notify();
-                    return;
-                };
-                example
-                    .parent()
-                    .map(|parent| parent.to_path_buf())
-                    .unwrap_or(root)
-            } else {
-                root
-            };
+            let (body, dest_dir) = self.new_file_body(project_ix, root);
             let dest = dest_dir.join(&name);
             self.close_file_prompt();
             self.focus_self(window, cx);
-            if from_example {
-                let Some(example) = example else {
-                    self.status = "This project has no .env.example.".into();
-                    cx.notify();
-                    return;
-                };
-                self.spawn_create_from_example(example, dest, name, cx);
-            } else {
-                self.spawn_create_file(dest, name, cx);
-            }
+            self.spawn_create_file(dest, name, body, cx);
         } else {
             let Some(project) = self.projects.get(project_ix) else {
                 return;
@@ -3317,40 +3667,62 @@ impl EnvyApp {
         }
     }
 
-    fn spawn_create_file(&mut self, dest: PathBuf, name: String, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, async_cx| {
-            let created = async_cx
-                .background_executor()
-                .spawn(async move { OpenFile::create(&dest, EnvDocument::parse("")).map(|_| dest) })
-                .await;
-            let _ = this.update(async_cx, |view, cx| {
-                match created {
-                    Ok(path) => {
-                        view.pending_file = Some(path);
-                        view.status = format!("Created {name}.");
-                        view.begin_scan(true, cx);
-                    }
-                    Err(_) => view.status = "Couldn't create that file.".into(),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+    fn new_file_body(&self, project_ix: usize, root: PathBuf) -> (NewFileBody, PathBuf) {
+        let FilePrompt::Create {
+            source, keys_only, ..
+        } = &self.file_prompt
+        else {
+            return (NewFileBody::Empty, root);
+        };
+        if *source == 0 {
+            return (NewFileBody::Empty, root);
+        }
+        let Some(project) = self.projects.get(project_ix) else {
+            return (NewFileBody::Empty, root);
+        };
+        let names: Vec<&str> = project
+            .files
+            .iter()
+            .map(|file| file.name.as_str())
+            .collect();
+        let Some(file_index) = copy_source_order(&names).get(source - 1).copied() else {
+            return (NewFileBody::Empty, root);
+        };
+        let Some(file) = project.files.get(file_index) else {
+            return (NewFileBody::Empty, root);
+        };
+        let parent = file
+            .path
+            .parent()
+            .map(|parent| parent.to_path_buf())
+            .unwrap_or(root);
+        (
+            NewFileBody::Copy {
+                source: file.path.clone(),
+                values: copy_values_for(&file.name, *keys_only),
+            },
+            parent,
+        )
     }
 
-    fn spawn_create_from_example(
+    fn spawn_create_file(
         &mut self,
-        example: PathBuf,
         dest: PathBuf,
         name: String,
+        body: NewFileBody,
         cx: &mut Context<Self>,
     ) {
         cx.spawn(async move |this, async_cx| {
             let created = async_cx
                 .background_executor()
                 .spawn(async move {
-                    let loaded = OpenFile::load(&example)?;
-                    let document = from_example(&loaded.document);
+                    let document = match &body {
+                        NewFileBody::Empty => EnvDocument::parse(""),
+                        NewFileBody::Copy { source, values } => {
+                            let loaded = OpenFile::load(source)?;
+                            copied_document(&loaded.document, *values)
+                        }
+                    };
                     OpenFile::create(&dest, document).map(|_| dest)
                 })
                 .await;
@@ -3358,7 +3730,7 @@ impl EnvyApp {
                 match created {
                     Ok(path) => {
                         view.pending_file = Some(path);
-                        view.status = format!("Created {name} from the example.");
+                        view.status = format!("Created {name}.");
                         view.begin_scan(true, cx);
                     }
                     Err(_) => view.status = "Couldn't create that file.".into(),
@@ -3835,7 +4207,10 @@ impl Render for EnvyApp {
             .on_action(cx.listener(|this, _: &SwitchZoneBack, window, cx| {
                 this.switch_zone(false, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &Confirm, window, cx| this.confirm(window, cx)))
+            .on_action(cx.listener(|this, _: &Confirm, window, cx| {
+                this.confirm(window, cx);
+                cx.stop_propagation();
+            }))
             .on_action(cx.listener(|this, _: &Cancel, window, cx| this.cancel(window, cx)))
             .on_action(cx.listener(|this, _: &CopyValue, _, cx| this.copy_selected(cx)))
             .on_action(cx.listener(|this, _: &ToggleReveal, _, cx| this.toggle_reveal(cx)))
@@ -3867,7 +4242,7 @@ impl Render for EnvyApp {
                 this.toggle_editor_view(window, cx);
             }))
             .on_action(cx.listener(|this, _: &NewFromExample, window, cx| {
-                this.new_from_example(window, cx);
+                this.begin_create_file(window, cx);
             }))
             .on_action(
                 cx.listener(|this, _: &AddFolder, window, cx| this.open_add_folder(window, cx)),
@@ -3886,6 +4261,9 @@ impl Render for EnvyApp {
 
         if !matches!(self.overlay, Overlay::None) {
             root = root.child(self.overlay_view(p, mono, window, cx));
+        }
+        if self.tab_menu.is_some() {
+            root = root.child(self.tab_menu_layer(p, cx));
         }
         if self.resize_drag.is_some() {
             root = root.child(self.resize_overlay(cx));
@@ -4389,34 +4767,7 @@ impl EnvyApp {
             if let FilePrompt::Rename { file_ix, input, .. } = &self.file_prompt {
                 if *file_ix == index {
                     let input = input.clone();
-                    let mut tab = h_flex()
-                        .relative()
-                        .h(px(TAB_H_PX))
-                        .px(px(TAB_PAD_X_PX))
-                        .gap(px(TAB_GAP_PX))
-                        .items_center()
-                        .rounded_t(px(6.))
-                        .font_family(mono.clone())
-                        .text_size(px(TAB_TEXT_PX))
-                        .line_height(px(TAB_LINE_PX))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(p.fg_primary)
-                        .bg(p.bg_canvas);
-                    if file.prod {
-                        tab = tab.child(
-                            div()
-                                .size(px(TAB_DOT_PX))
-                                .rounded(px(999.))
-                                .bg(p.prod_dot)
-                                .flex_shrink_0(),
-                        );
-                    }
-                    tab = tab.child(div().min_w(px(72.)).child(inline_field(
-                        &input,
-                        p,
-                        TAB_LINE_PX,
-                    )));
-                    tabs = tabs.child(tab);
+                    tabs = tabs.child(editing_tab(&input, file.prod, p, mono.clone()));
                     continue;
                 }
             }
@@ -4456,21 +4807,28 @@ impl EnvyApp {
                     p.fg_secondary
                 })
                 .tooltip(hover_tip(tip))
-                .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-                    entity.update(cx, |this, cx| {
-                        this.zone = Zone::Tabs;
-                        this.tab_cursor = index;
-                        if event.click_count >= 2
-                            && !event.modifiers.control
-                            && !event.modifiers.shift
-                        {
-                            this.begin_rename_file(index, window, cx);
-                        } else if event.modifiers.control || event.modifiers.shift {
-                            this.toggle_compare_tab(index, cx);
-                        } else {
-                            this.activate_tab(index, false, window, cx);
-                        }
-                    });
+                .on_mouse_down(MouseButton::Left, {
+                    let entity = entity.clone();
+                    move |event, window, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.zone = Zone::Tabs;
+                            this.tab_cursor = index;
+                            if event.click_count >= 2
+                                && !event.modifiers.control
+                                && !event.modifiers.shift
+                            {
+                                this.begin_rename_file(index, window, cx);
+                            } else if event.modifiers.control || event.modifiers.shift {
+                                this.toggle_compare_tab(index, cx);
+                            } else {
+                                this.activate_tab(index, false, window, cx);
+                            }
+                        });
+                    }
+                })
+                .on_mouse_down(MouseButton::Right, move |_, window, cx| {
+                    cx.stop_propagation();
+                    entity.update(cx, |this, cx| this.open_tab_menu(index, window, cx));
                 });
 
             if cursor_tab {
@@ -4544,7 +4902,14 @@ impl EnvyApp {
         }
 
         if let FilePrompt::Create { input, .. } = &self.file_prompt {
-            tabs = tabs.child(file_name_field(input, p, mono.clone()));
+            let input = input.clone();
+            let name = input.read(cx).value().to_string();
+            tabs = tabs.child(editing_tab(
+                &input,
+                is_prod_filename(&name),
+                p,
+                mono.clone(),
+            ));
         }
 
         let error = match &self.file_prompt {
@@ -4552,6 +4917,9 @@ impl EnvyApp {
             FilePrompt::None => None,
         };
         let mut column = v_flex().w_full().flex_shrink_0().child(tabs);
+        if matches!(self.file_prompt, FilePrompt::Create { .. }) {
+            column = column.child(self.render_new_file_sources(p, cx));
+        }
         if let Some(error) = error {
             column = column.child(
                 div()
@@ -4580,10 +4948,6 @@ impl EnvyApp {
         let can_redo = self.open.as_ref().is_some_and(|open| open.can_redo());
         let has_open = self.open.is_some();
         let file_count = self.file_count();
-        let has_example = self
-            .project_ix
-            .and_then(|ix| self.projects.get(ix))
-            .is_some_and(|project| project.files.iter().any(|f| is_example_filename(&f.name)));
 
         let left_side = if diff_open {
             let mut left = h_flex().items_center().gap(px(8.)).flex_1().min_w(px(0.));
@@ -4822,6 +5186,7 @@ impl EnvyApp {
                     self.project_ix.is_none(),
                     p,
                 )
+                .tooltip_with_action("New file", &NewFromExample, Some("Envy"))
                 .on_click({
                     let entity = entity.clone();
                     move |_, window, cx| {
@@ -4934,23 +5299,6 @@ impl EnvyApp {
                     let entity = entity.clone();
                     move |_, _, cx| {
                         entity.update(cx, |this, cx| this.toggle_diff(cx));
-                    }
-                }),
-            )
-            .child(
-                toolbar_icon_button(
-                    "tb-example",
-                    IconName::FilePlus,
-                    "New file from example",
-                    false,
-                    !has_example,
-                    p,
-                )
-                .tooltip_with_action("New file from example", &NewFromExample, Some("Envy"))
-                .on_click({
-                    let entity = entity.clone();
-                    move |_, window, cx| {
-                        entity.update(cx, |this, cx| this.new_from_example(window, cx));
                     }
                 }),
             )
@@ -6510,6 +6858,324 @@ impl EnvyApp {
         )
     }
 
+    fn render_new_file_sources(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let (source, keys_only, source_focus) = match &self.file_prompt {
+            FilePrompt::Create {
+                source,
+                keys_only,
+                source_focus,
+                ..
+            } => (*source, *keys_only, *source_focus),
+            _ => (0, true, false),
+        };
+        let files = self
+            .project_ix
+            .and_then(|ix| self.projects.get(ix))
+            .map(|project| project.files.clone())
+            .unwrap_or_default();
+        let names: Vec<&str> = files.iter().map(|file| file.name.as_str()).collect();
+        let order = copy_source_order(&names);
+
+        let mut row = h_flex()
+            .id("new-file-sources")
+            .w_full()
+            .px(px(12.))
+            .py(px(6.))
+            .gap(px(6.))
+            .items_center()
+            .flex_wrap()
+            .bg(p.bg_canvas)
+            .border_b_1()
+            .border_color(p.border_hairline)
+            .child(self.source_choice(0, "Start empty", source, source_focus, p, cx));
+
+        if !order.is_empty() {
+            row = row.child(
+                div()
+                    .pl(px(4.))
+                    .text_size(px(12.))
+                    .line_height(px(16.))
+                    .text_color(p.fg_tertiary)
+                    .child("Copy from"),
+            );
+            for (slot, file_index) in order.iter().copied().enumerate() {
+                let name = files[file_index].name.clone();
+                row = row.child(self.source_choice(slot + 1, &name, source, source_focus, p, cx));
+            }
+        }
+
+        let show_toggle = source > 0
+            && order
+                .get(source - 1)
+                .and_then(|&index| files.get(index))
+                .is_some_and(|file| !is_example_filename(&file.name));
+        if show_toggle {
+            row = row.child(self.copy_mode_toggle(keys_only, p, cx));
+        }
+        row
+    }
+
+    fn source_choice(
+        &self,
+        index: usize,
+        label: &str,
+        selected: usize,
+        focused: bool,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let chosen = index == selected;
+        let entity = cx.entity();
+        let mut chip = h_flex()
+            .id(SharedString::from(format!("new-file-source-{index}")))
+            .px(px(8.))
+            .h(px(22.))
+            .rounded(px(4.))
+            .items_center()
+            .cursor_pointer()
+            .text_size(px(12.))
+            .line_height(px(16.))
+            .text_color(if chosen { p.accent } else { p.fg_secondary })
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                cx.stop_propagation();
+                entity.update(cx, |this, cx| {
+                    if let FilePrompt::Create {
+                        source,
+                        source_focus,
+                        ..
+                    } = &mut this.file_prompt
+                    {
+                        *source = index;
+                        *source_focus = false;
+                    }
+                    this.commit_file_prompt(window, cx);
+                });
+            });
+        if chosen {
+            chip = chip.bg(p.accent_subtle);
+            if focused {
+                chip = chip.border_1().border_color(p.accent_ring);
+            }
+        } else {
+            chip = chip.hover(move |style| style.bg(p.bg_hover).text_color(p.fg_primary));
+        }
+        chip.child(label.to_string())
+    }
+
+    fn copy_mode_toggle(
+        &self,
+        keys_only: bool,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        h_flex()
+            .ml(px(6.))
+            .gap(px(2.))
+            .p(px(2.))
+            .rounded(px(6.))
+            .bg(p.bg_chrome)
+            .child(self.copy_mode_button(true, "Keys only", keys_only, p, cx))
+            .child(self.copy_mode_button(false, "Keys and values", keys_only, p, cx))
+    }
+
+    fn copy_mode_button(
+        &self,
+        want: bool,
+        label: &'static str,
+        keys_only: bool,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selected = keys_only == want;
+        let entity = cx.entity();
+        let mut button = h_flex()
+            .id(SharedString::from(if want {
+                "copy-keys-only"
+            } else {
+                "copy-keys-and-values"
+            }))
+            .px(px(8.))
+            .h(px(20.))
+            .rounded(px(4.))
+            .items_center()
+            .cursor_pointer()
+            .text_size(px(11.5))
+            .line_height(px(16.))
+            .text_color(if selected { p.accent } else { p.fg_tertiary })
+            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                cx.stop_propagation();
+                entity.update(cx, |this, cx| {
+                    if let FilePrompt::Create { keys_only, .. } = &mut this.file_prompt {
+                        *keys_only = want;
+                    }
+                    cx.notify();
+                });
+            });
+        if selected {
+            button = button.bg(p.bg_canvas);
+        }
+        button.child(label)
+    }
+
+    fn delete_file_panel(&self, name: String, p: Palette, cx: &mut Context<Self>) -> gpui_kit::Div {
+        let entity = cx.entity();
+        let cancel = entity.clone();
+        div().child(
+            v_flex()
+                .id("delete-file-dialog")
+                .w(px(320.))
+                .bg(p.bg_surface)
+                .border_1()
+                .border_color(p.border_control)
+                .rounded(px(10.))
+                .shadow_lg()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .px(px(16.))
+                        .pt(px(16.))
+                        .pb(px(12.))
+                        .text_size(px(14.))
+                        .line_height(px(20.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(p.fg_primary)
+                        .child(format!("Delete {name}?")),
+                )
+                .child(
+                    h_flex()
+                        .px(px(16.))
+                        .pb(px(16.))
+                        .gap(px(8.))
+                        .justify_end()
+                        .child(
+                            h_flex()
+                                .id("delete-file-cancel")
+                                .px(px(12.))
+                                .h(px(28.))
+                                .rounded(px(6.))
+                                .items_center()
+                                .cursor_pointer()
+                                .text_size(px(13.))
+                                .line_height(px(18.))
+                                .text_color(p.fg_secondary)
+                                .hover(move |style| style.bg(p.bg_hover))
+                                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    cancel.update(cx, |this, cx| this.close_overlay(window, cx));
+                                })
+                                .child("Cancel"),
+                        )
+                        .child(
+                            h_flex()
+                                .id("delete-file-confirm")
+                                .px(px(12.))
+                                .h(px(28.))
+                                .rounded(px(6.))
+                                .items_center()
+                                .cursor_pointer()
+                                .bg(p.danger_bg)
+                                .border_1()
+                                .border_color(p.danger_border)
+                                .text_size(px(13.))
+                                .line_height(px(18.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(p.danger)
+                                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    entity.update(cx, |this, cx| {
+                                        let Overlay::DeleteFile { file_ix, .. } = &this.overlay
+                                        else {
+                                            return;
+                                        };
+                                        let file_ix = *file_ix;
+                                        this.delete_tab(file_ix, window, cx);
+                                    });
+                                })
+                                .child("Delete"),
+                        ),
+                ),
+        )
+    }
+
+    fn tab_menu_layer(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(menu) = &self.tab_menu else {
+            return div();
+        };
+        let file_ix = menu.file_ix;
+        let cursor = menu.cursor;
+        let entity = cx.entity();
+        let close = entity.clone();
+        let nudge = (file_ix as f32 * 72.).min(420.);
+        let items = ["Rename", "Duplicate", "Reveal in Explorer", "Delete file"];
+        let mut panel = v_flex()
+            .id("tab-menu")
+            .w(px(220.))
+            .py(px(4.))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(p.border_control)
+            .bg(p.bg_surface)
+            .shadow_lg()
+            .occlude();
+        for (index, label) in items.iter().enumerate() {
+            if index == 3 {
+                panel = panel.child(div().mx(px(8.)).my(px(4.)).h(px(1.)).bg(p.border_hairline));
+            }
+            let chosen = cursor == index;
+            let danger = index == 3;
+            let item_entity = entity.clone();
+            let mut item = h_flex()
+                .id(SharedString::from(format!("tab-menu-{index}")))
+                .h(px(28.))
+                .mx(px(4.))
+                .px(px(8.))
+                .rounded(px(5.))
+                .items_center()
+                .cursor_pointer()
+                .text_size(px(13.))
+                .line_height(px(18.))
+                .text_color(if danger { p.danger } else { p.fg_primary })
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    cx.stop_propagation();
+                    item_entity.update(cx, |this, cx| {
+                        if let Some(menu) = &mut this.tab_menu {
+                            menu.cursor = index;
+                        }
+                        this.activate_tab_menu(window, cx);
+                    });
+                });
+            if chosen {
+                item = item.bg(if danger { p.danger_bg } else { p.accent_subtle });
+            } else {
+                let hover_bg = if danger { p.danger_bg } else { p.bg_hover };
+                item = item.hover(move |style| style.bg(hover_bg));
+            }
+            panel = panel.child(item.child(*label));
+        }
+
+        div()
+            .absolute()
+            .inset_0()
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                close.update(cx, |this, cx| this.close_tab_menu(window, cx));
+            })
+            .on_mouse_down(MouseButton::Right, {
+                let close = entity;
+                move |_, window, cx| {
+                    close.update(cx, |this, cx| this.close_tab_menu(window, cx));
+                }
+            })
+            .child(
+                div()
+                    .absolute()
+                    .top(TAB_BAR_H)
+                    .left(px(self.sidebar_width + 12. + nudge))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                    .child(panel),
+            )
+    }
+
     fn overlay_view(
         &self,
         p: Palette,
@@ -6524,6 +7190,7 @@ impl EnvyApp {
             Overlay::Paste(plan) => self.paste_panel(plan, p, mono, cx),
             Overlay::Shortcuts => self.shortcuts_panel(p, mono, cx),
             Overlay::Unreadable => self.unreadable_panel(p, mono, cx),
+            Overlay::DeleteFile { name, .. } => self.delete_file_panel(name.clone(), p, cx),
             Overlay::None => div(),
         };
         div()
@@ -7209,7 +7876,9 @@ impl EnvyApp {
 }
 
 const SHORTCUTS: &[(&str, &str)] = &[
-    ("↑  ↓", "Move. In a field, start or end"),
+    ("↑  ↓", "Move. Down leaves a search"),
+    ("Ctrl+Shift+N", "New file"),
+    ("Right-click", "File menu"),
     ("Enter", "Close the cell, or open the project"),
     ("Tab", "Key, value, then the next key"),
     ("Shift+Tab", "Previous cell, or the previous area"),
@@ -7252,6 +7921,10 @@ enum IoDone {
         epoch: u64,
         result: std::io::Result<OpenFile>,
     },
+    Deleted {
+        name: String,
+        result: std::io::Result<()>,
+    },
     Quit,
 }
 
@@ -7284,7 +7957,37 @@ fn run_io(job: IoJob) -> IoDone {
             let result = OpenFile::load(&path);
             IoDone::Reloaded { epoch, result }
         }
+        IoJob::Delete { path, name } => {
+            let result = std::fs::remove_file(&path);
+            IoDone::Deleted { name, result }
+        }
         IoJob::Quit => IoDone::Quit,
+    }
+}
+
+fn open_containing_folder(path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{}", path.display()))
+            .spawn()
+            .map(|_| ())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let dir = path.parent().unwrap_or(path);
+        std::process::Command::new("xdg-open")
+            .arg(dir)
+            .spawn()
+            .map(|_| ())
     }
 }
 
@@ -7622,19 +8325,39 @@ fn sidebar_section(label: &'static str, divider: bool, p: Palette) -> gpui_kit::
         )
 }
 
-fn file_name_field(input: &Entity<TextInput>, p: Palette, mono: SharedString) -> gpui_kit::Div {
-    div()
+fn editing_tab(
+    input: &Entity<TextInput>,
+    prod: bool,
+    p: Palette,
+    mono: SharedString,
+) -> gpui_kit::Div {
+    let mut tab = h_flex()
+        .relative()
         .h(px(TAB_H_PX))
         .px(px(TAB_PAD_X_PX))
-        .min_w(px(96.))
-        .mb(px(4.))
-        .flex_shrink_0()
+        .gap(px(TAB_GAP_PX))
+        .items_center()
+        .rounded_t(px(6.))
         .font_family(mono)
         .text_size(px(TAB_TEXT_PX))
         .line_height(px(TAB_LINE_PX))
+        .font_weight(FontWeight::MEDIUM)
         .text_color(p.fg_primary)
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(inline_field(input, p, TAB_LINE_PX))
+        .bg(p.bg_canvas);
+    if prod {
+        tab = tab.child(
+            div()
+                .size(px(TAB_DOT_PX))
+                .rounded(px(999.))
+                .bg(p.prod_dot)
+                .flex_shrink_0(),
+        );
+    }
+    tab.child(
+        div()
+            .min_w(px(72.))
+            .child(inline_field(input, p, TAB_LINE_PX)),
+    )
 }
 
 /// The field sits on the label's line. The ring is drawn outside that line.

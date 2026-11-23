@@ -15,7 +15,7 @@ crates/envy-core/          no window, no gpui
   session.rs               one open file: undo stack, dirty flag, atomic save
   discover.rs              parallel walk, path cache, git grouping, env file names
   diff.rs paste.rs         compare files, Vercel-style paste
-  scaffold.rs              .env.example -> new file, secrets cleared
+  scaffold.rs              new file copy: example values kept, other files keys-only
   search.rs config.rs      key-name scoring (unused by the window), config.toml
   deeplink.rs hotkey.rs    envy:// and the global chord
   future.rs                named, unimplemented seams (age, self-decrypting HTML, git exposure)

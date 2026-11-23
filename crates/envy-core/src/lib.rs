@@ -55,7 +55,8 @@ pub use document::{
 pub use hotkey::{Hotkey, HotkeyError};
 pub use interact::{
     enter_while_suggesting, is_cell_commit_key, route_cell_edit, route_value_edit, row_click,
-    CellMotion, CellRoute, EditCell, EnterEffect, RowClick, RowTarget, ValueMotion, ValueRoute,
+    search_landing, step_index, CellMotion, CellRoute, EditCell, EnterEffect, RowClick, RowTarget,
+    ValueMotion, ValueRoute, TAB_MENU_LEN,
 };
 pub use names::{
     check_env_filename, env_name_taken, next_env_filename, normalize_env_filename, rename_env_file,
@@ -66,7 +67,7 @@ pub use pathfmt::{
     abbreviate_home, host_path_style, native_project_path, sidebar_path_chars, truncate_path_head,
     PathStyle,
 };
-pub use scaffold::from_example;
+pub use scaffold::{copied_document, copy_source_order, copy_values_for, from_example, CopyValues};
 pub use search::{search, SearchHit, SearchKind};
 pub use session::{inspect_disk, save_text, DiskNotice, OpenFile};
 pub use suggest::{common_env_keys, match_span, suggest_keys, KeySuggestion, SuggestionSource};

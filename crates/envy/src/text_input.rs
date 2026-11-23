@@ -48,6 +48,7 @@ actions!(
         CaretUndo,
         CaretRedo,
         CaretSubmit,
+        CaretExitDown,
     ]
 );
 
@@ -67,7 +68,10 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("shift-home", CaretSelectHome, field),
         KeyBinding::new("shift-end", CaretSelectEnd, field),
         KeyBinding::new("up", CaretLineStart, field),
-        KeyBinding::new("down", CaretLineEnd, field),
+        // Search fields and the new-file name set `EnvyExitDown`, so Down
+        // leaves the field instead of moving the caret.
+        KeyBinding::new("down", CaretLineEnd, Some("EnvyText && !EnvyExitDown")),
+        KeyBinding::new("down", CaretExitDown, Some("EnvyExitDown")),
         KeyBinding::new("shift-up", CaretSelectLineStart, field),
         KeyBinding::new("shift-down", CaretSelectLineEnd, field),
         KeyBinding::new("pageup", CaretLineStart, field),
@@ -101,6 +105,8 @@ pub enum TextInputEvent {
     Submit,
     Focus,
     Blur,
+    /// Down should leave this field. The caret stays where it is.
+    ExitDown,
 }
 
 pub struct TextInput {
@@ -117,6 +123,8 @@ pub struct TextInput {
     caret_on: bool,
     caret_epoch: u64,
     focus_wired: bool,
+    /// Down emits [`TextInputEvent::ExitDown`] instead of moving to the line end.
+    exit_down: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -136,8 +144,14 @@ impl TextInput {
             caret_on: true,
             caret_epoch: 0,
             focus_wired: false,
+            exit_down: false,
             _subs: Vec::new(),
         }
+    }
+
+    pub fn exit_down(mut self) -> Self {
+        self.exit_down = true;
+        self
     }
 
     pub fn with_text(mut self, text: impl Into<String>) -> Self {
@@ -325,6 +339,11 @@ impl TextInput {
     fn line_end(&mut self, _: &CaretLineEnd, window: &mut Window, cx: &mut Context<Self>) {
         self.field.end(false);
         self.moved(window, cx);
+    }
+
+    fn leave_on_down(&mut self, _: &CaretExitDown, _window: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(TextInputEvent::ExitDown);
+        cx.stop_propagation();
     }
 
     fn select_line_start(
@@ -900,10 +919,11 @@ impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_focus(window, cx);
         let entity = cx.entity();
-        div()
-            .size_full()
-            .min_w(px(0.))
-            .key_context("EnvyText")
+        let mut field = div().size_full().min_w(px(0.)).key_context("EnvyText");
+        if self.exit_down {
+            field = field.key_context("EnvyExitDown");
+        }
+        field
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::left))
@@ -920,6 +940,7 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::select_end))
             .on_action(cx.listener(Self::line_start))
             .on_action(cx.listener(Self::line_end))
+            .on_action(cx.listener(Self::leave_on_down))
             .on_action(cx.listener(Self::select_line_start))
             .on_action(cx.listener(Self::select_line_end))
             .on_action(cx.listener(Self::select_all_action))

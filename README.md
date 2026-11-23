@@ -21,7 +21,7 @@ The window is [GPUI](https://github.com/zed-industries/zed) through [gpui-kit](h
 - Values are masked. Reveal one key, or all of them. Copy clears the clipboard after 30 seconds unless you turn that off.
 - Ctrl+click or Shift+click two file tabs to compare them. Keys line up in two columns. Each row can copy a value either way, and each side can copy every missing key. A plain click returns to the file.
 - Paste a block of `KEY=value` lines. Envy shows a preview; Enter applies it.
-- New file from `.env.example` (`Ctrl+Shift+N`). The name starts as `.env`, or the next free name, and you can change it before Enter. Comments and safe defaults stay. Secret values are cleared.
+- New file (`+` or `Ctrl+Shift+N`). The name starts as `.env`, or the next free name, and you can change it before Enter. Start empty, or copy keys and comments from another env file in the project. `.env.example` keeps its values. Other files copy keys only unless you ask for the values too.
 - Find a project from the sidebar field, and a key from the field above the list. `/` or `Ctrl+F` focuses the field for the area you are in. Values are not searchable and are not stored.
 - Light and dark, following the system, with an override. The accent is the logo green. A production file name gets a red dot.
 - One window. `envy://` links and a second launch go to the window that is already open. `Ctrl+Alt+E` raises it. Closing the window quits.
@@ -32,7 +32,7 @@ Press `?` for the same list inside the window.
 
 | Key | Action |
 | --- | --- |
-| `↑` `↓` | Move between rows. Inside a field, they move to the start or end of the text |
+| `↑` `↓` | Move between rows. Down from a search field enters the list. Up from the first row returns to the search |
 | `Enter` | Open the project or tab. In a cell, commit and close the field |
 | `Tab` `Shift+Tab` | Next / previous area: projects, file tabs, keys |
 | `←` | Back to the project list. In the file tabs, the previous tab |
@@ -52,7 +52,8 @@ Press `?` for the same list inside the window.
 | `Ctrl+Y` or `Ctrl+Shift+Z` | Redo |
 | `Tab` / `Shift+Tab` | Next or previous cell: key, then value, then the next key |
 | `Ctrl+V` | Paste `KEY=value` lines |
-| `Ctrl+Shift+N` | New file from the example |
+| `Ctrl+Shift+N` | New file |
+| Right-click a file | Rename, duplicate, reveal, or delete |
 | `Ctrl+O` | Add a folder |
 | `Ctrl+,` | Settings |
 | `Ctrl+R` | Rescan folders |

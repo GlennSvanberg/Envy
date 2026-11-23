@@ -171,14 +171,13 @@ Two font families only:
 - **Right region (`gap(4 px)` within groups, `1 px × 16 px` `border.hairline` dividers with `mx(4 px)` between groups):**
   - *Edit group:*
     - `Copy` — Copy all enabled keys as `KEY=value` lines
-    - `Plus` — New file in the current project (asks for a name, default `.env`, or the next free name)
+    - `Plus` — New file in the current project (`Ctrl+Shift+N`). The inline name starts as `.env`, or the next free name.
     - `Undo2` — Undo (`Ctrl+Z`), disabled state when `!can_undo`
     - `Redo2` — Redo (`Ctrl+Y`), disabled state when `!can_redo`
   - *View & file group:*
     - `Eye` / `EyeOff` — Show/Hide all values (`A`), selected tint when active (disabled in plain text view)
     - `FileCode` / `List` — Switch between Table and Plain text view (`Ctrl+E`), selected tint when in plain text view, preference remembered in config
     - `Columns2` — Compare two files (`D`), selected tint when active, disabled when `< 2` files
-    - `FilePlus` — New file from `.env.example` (`Ctrl+Shift+N`). The inline name starts as `.env`, or the next free name, and can be changed before Enter. Disabled when no example exists.
   - *Utility group:*
     - `Keyboard` — Keyboard shortcuts (`?`)
     - `Settings` — Settings (`Ctrl+,`)
@@ -201,7 +200,7 @@ Two font families only:
   - **Actions column (`w(64 px)`, `flex_shrink_0`, `justify_end`, `gap(4 px)`):** `Copy` (`Copy`) and `Reveal/Hide` (`Eye` / `EyeOff`) `24 × 24 px` icon buttons. Visible when the row is selected (focused) or hovered.
   - **Tail action:** A quiet `+ Add key` ghost row (`32 px`, `fg.tertiary`) sits below the last key so the table finishes cleanly above open canvas space.
   - **Inline editing (`Value`, `Rename`, `New`) & key-name autocomplete:** Renders inside the key column and the flexible value column with the shared single-line field and no outer double-border. The field shows a caret, a muted green selection, and ordinary editing (arrows, Home/End, Shift, word jumps, clipboard, undo). Up and Down stay in the field. Tab moves key → value → the next row's key. Enter commits and closes the field; the row stays selected. Esc cancels. The field uses the same type size, line height, and insets as the label, so the glyphs do not move. The ring sits outside the text. Once at least 1 character is typed into a new or renamed key name, a quiet compact list (max 5 keys, matching the key input width, no source badges or footer bar, lightly emphasizing the matched text) appears directly below, ranked by sibling env files missing from this file, other discovered projects, then common env key names. A click picks a key and never prefills a value.
-  - **File name:** `+` in the toolbar asks for a new env file name in the tab bar. The field starts as `.env`, or the next free name (`.env.local`, `.env.development`, `.env.dev`, then `.env.2`, `.env.3`, …) when that name exists. The name is selected so it can be changed before Enter. `Ctrl+Shift+N` uses that same field and fills the file from `.env.example`. Double-clicking a tab renames that file in place. Enter confirms, Esc cancels, and a name that is taken or not an env file is explained on the line under the field.
+  - **File name:** `+` and `Ctrl+Shift+N` put the new file into the tab bar in the same inline editor used to rename a tab. The field starts as `.env`, or the next free name (`.env.local`, `.env.development`, `.env.dev`, then `.env.2`, `.env.3`, …) when that name exists. The name is selected so it can be changed before Enter. A quiet row under the tabs offers `Start empty` (the default) and `Copy from` each other env file, with `.env.example` first. Arrows and Enter choose, and so does a click. Enter in the name field with nothing else chosen creates an empty file. A copy keeps keys and comments. Example files keep their values. Any other file copies keys only until the row's toggle is set to keys and values. Double-clicking a tab renames that file in place. Enter confirms, Esc cancels, and a name that is taken or not an env file is explained on the line under the field. Right-clicking a tab opens Rename, Duplicate, Reveal in Explorer, and Delete file. Delete asks `Delete {name}?` and Enter confirms.
 
 ### 5.4b Plain Text Editor View
 - Toggled via the toolbar `FileCode` / `List` icon button or `Ctrl+E`. Choice is persisted in config (`editor_view = "table" | "text"`).

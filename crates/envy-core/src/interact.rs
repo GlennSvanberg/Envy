@@ -121,6 +121,27 @@ pub fn enter_while_suggesting(chosen: Option<usize>) -> EnterEffect {
 /// `"enter"`. That virtual key is the main Return key and the numpad Enter;
 /// the extended-key bit is not part of the name. `"kp_enter"` is accepted for
 /// platforms that label the numpad key on its own.
+/// File-tab menu length: Rename, Duplicate, Reveal in Explorer, Delete file.
+pub const TAB_MENU_LEN: usize = 4;
+
+/// Move `current` by `delta` and stay inside `0..len`.
+pub fn step_index(current: usize, len: usize, delta: isize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    (current as isize + delta).clamp(0, len as isize - 1) as usize
+}
+
+/// Row to land on when Down leaves a search field.
+///
+/// The marked row wins when it is still visible. Otherwise the first hit.
+/// An empty list has nowhere to land.
+pub fn search_landing(selected: Option<usize>, visible: &[usize]) -> Option<usize> {
+    selected
+        .filter(|index| visible.contains(index))
+        .or_else(|| visible.first().copied())
+}
+
 pub fn is_cell_commit_key(key: &str) -> bool {
     matches!(key, "enter" | "kp_enter" | "numpadenter")
 }
@@ -269,6 +290,20 @@ mod tests {
         assert_eq!(
             enter_while_suggesting(Some(2)),
             EnterEffect::AcceptSuggestion(2)
+        );
+    }
+
+    #[test]
+    fn down_from_search_keeps_the_marked_row_when_it_is_visible() {
+        assert_eq!(search_landing(Some(2), &[0, 1, 2]), Some(2));
+        assert_eq!(search_landing(None, &[3, 4]), Some(3));
+        assert_eq!(search_landing(Some(5), &[0, 1]), Some(0));
+        assert_eq!(search_landing(Some(1), &[]), None);
+        assert_eq!(step_index(0, TAB_MENU_LEN, -1), 0);
+        assert_eq!(step_index(0, TAB_MENU_LEN, 1), 1);
+        assert_eq!(
+            step_index(TAB_MENU_LEN - 1, TAB_MENU_LEN, 1),
+            TAB_MENU_LEN - 1
         );
     }
 
