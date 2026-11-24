@@ -152,8 +152,8 @@ Two font families only:
   - **Inactive tab:** Transparent background, `fg.secondary`, hover fill `bg.hover` with `fg.primary`.
   - **Keyboard focus (`zone == Zone::Tabs`):** The focused cursor tab displays a crisp `1 px` `accent.ring` outline and subtle `accent.subtle` fill.
   - **Indicators:**
-    - Production file: `6 px` amber dot (`status.prod`) before the filename.
-    - Missing keys vs `.env.example`: subtle `5 px` amber dot (`status.warning_dot` @ 65%) after the filename with tooltip `"Missing keys vs .env.example"`.
+    - Production file: `6 px` amber dot (`status.prod`) before the filename. Tooltip includes `Production`.
+    - Unsaved: `6 px` accent dot after the filename, only while this open file differs from the last successful write (or the last write failed). Tooltip includes `Unsaved`. A change made outside Envy uses the banner, not a dot. Missing keys stay on the toolbar pill, not a second amber dot.
     - **Same filename:** The filename stays. A muted suffix (`11 px`, normal weight, `fg.tertiary`, at most `96 px`) shows the shortest unique trailing directories (`backend`, `api/src`). A file in the project root has no suffix. The tooltip starts with the project-relative path (`backend/.env` or `.env`, then `Ctrl+click to compare`). Compare headers, the Copy from row, and `Delete {path}?` use the same distinction.
 
 ### 5.3 Workspace Toolbar
@@ -205,7 +205,7 @@ Two font families only:
 
 ### 5.4b Plain Text Editor View
 - Toggled via the toolbar `FileCode` / `List` icon button or `Ctrl+E`. Choice is persisted in config (`editor_view = "table" | "text"`).
-- Edge-to-edge monospace code editor with line numbers, `.env` syntax highlighting (keys, values, strings, numbers, booleans, `${VAR}` interpolations, comments, disabled lines), and native text undo/redo. Edits are written after a short pause.
+- Edge-to-edge monospace code editor with line numbers, `.env` syntax highlighting (keys, values, strings, numbers, booleans, `${VAR}` interpolations, comments, disabled lines), and native text undo/redo. Typing is written after a short pause (300 ms). Leaving the view writes immediately.
 - Unsaved changes stay losslessly synced when switching between Table and Plain text views; invalid lines stay verbatim and surface through the footer's unreadable-lines indicator.
 
 ### 5.5 Two-Column Compare View
@@ -225,7 +225,7 @@ Two font families only:
 ### 5.6 Footer / Status Bar
 - Height `28 px`, `px(12 px)`, `bg.chrome`, `border_t_1` (`border.hairline`), `items_center`, `justify_between`.
 - **Left (`flex_1`, `min_w(0)`, `gap(8 px)`):**
-  - Active transient status message (`11.5 px`, `fg.secondary`). A committed edit may show `Saved.` briefly, then the line returns to the short project-relative path (`project/relative/.env`, `11 px`, mono, `fg.tertiary`, `truncate()`, with full absolute path in the hover tooltip).
+  - Save indicator, then the active transient status message (`11.5 px`, `fg.secondary`). Typing shows `Saving…` once the write starts, then a check and `Saved` that fades. A failed write is a warning chip, `Couldn't save – Retry`, and stays until a later write works. With nothing to report, the line is the short project-relative path (`project/relative/.env`, `11 px`, mono, `fg.tertiary`, `truncate()`, with full absolute path in the hover tooltip).
   - Neutral clickable unreadable-lines note (shown only when the open file has lines that are neither comment, blank, nor assignment): e.g. `"2 lines Envy can't read"` (`bg.kbd`, `border.hairline`, `fg.secondary`, zero red/warning styling). Opens a read-only modal listing exact 1-based line numbers and raw lines.
 - **Right (`flex_shrink_0`, `gap(12 px)`):**
   - 3–4 context-sensitive shortcut hints composed of a micro keycap (`bg.kbd`, `1 px` `border.control`, `rounded(4 px)`, `px(5 px)`, `py(1 px)`, `10 px` mono, `fg.secondary`) + short label (`11 px`, `fg.tertiary`).

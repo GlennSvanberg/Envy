@@ -79,6 +79,6 @@ pub use pathfmt::{
 };
 pub use scaffold::{copied_document, copy_source_order, copy_values_for, from_example, CopyValues};
 pub use search::{search, SearchHit, SearchKind};
-pub use session::{inspect_disk, save_text, DiskNotice, OpenFile};
+pub use session::{inspect_disk, save_text, DiskNotice, OpenFile, SAVE_PAUSE};
 pub use suggest::{common_env_keys, match_span, suggest_keys, KeySuggestion, SuggestionSource};
 pub use text_field::{first_line, TextField};

@@ -34,6 +34,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Test path labels
         run: cargo test -p envy-core --locked --lib labels
+      - name: Test saves
+        run: cargo test -p envy-core --locked --lib session
       - name: Release build
         run: cargo build --release -p envy --locked
       - uses: actions/upload-artifact@v4

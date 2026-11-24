@@ -26,7 +26,7 @@ use envy_core::{
     Deeplink, EditCell, EditorView, EnterEffect, EnvDocument, EnvFile, EnvFileNameError, FoundEnv,
     KeySuggestion, OpenFile, PathStyle, Project, RowClick, RowTarget, ScanError, ThemeSetting,
     KEY_CELL_GAP_PX, KEY_CELL_PAD_RIGHT_PX, KEY_LINE_PX, KEY_RELATED_ICON_PX, KEY_RELATED_PAD_PX,
-    KEY_SEARCH_MIN_PX, KEY_SEARCH_PREFERRED_PX, KEY_TEXT_PX, KEY_TOGGLE_W_PX,
+    KEY_SEARCH_MIN_PX, KEY_SEARCH_PREFERRED_PX, KEY_TEXT_PX, KEY_TOGGLE_W_PX, SAVE_PAUSE,
     SEARCH_BAND_BORDER_PX, SEARCH_BAND_H_PX, SEARCH_FIELD_H_PX, SEARCH_LINE_PX, SEARCH_TEXT_PX,
     TAB_DOT_PX, TAB_GAP_PX, TAB_H_PX, TAB_LINE_PX, TAB_MENU_LEN, TAB_PAD_X_PX, TAB_TEXT_PX,
     TOOLBAR_NOTICE_MIN_PX, TOOLBAR_NOTICE_SHRINK, TOOLBAR_SEARCH_SHRINK, VALUE_PAD_RIGHT_PX,
@@ -41,8 +41,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, size, AnyView, AnyWindowHandle, App, Bounds, ClipboardItem, Context, Entity,
-    FocusHandle, Focusable, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent,
+    div, px, size, AnyElement, AnyView, AnyWindowHandle, App, Bounds, ClipboardItem, Context,
+    Entity, FocusHandle, Focusable, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent,
     PathPromptOptions, ScrollHandle, SharedString, Subscription, Task, Window, WindowBounds,
     WindowOptions,
 };
@@ -59,8 +59,7 @@ use crate::theme::{
 };
 
 const CLEAR_AFTER: Duration = Duration::from_secs(30);
-const TEXT_SAVE_AFTER: Duration = Duration::from_millis(450);
-const SAVED_FLASH_AFTER: Duration = Duration::from_millis(900);
+const SAVED_FLASH_AFTER: Duration = Duration::from_millis(1200);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Zone {
@@ -88,6 +87,26 @@ struct Editor {
     kind: EditKind,
     suggestions: Vec<KeySuggestion>,
     suggestions_open: bool,
+    /// Document from the moment the cell opened. Live edits undo back to this.
+    baseline: EnvDocument,
+    /// [`OpenFile::arm_undo`] has pushed `baseline`.
+    undo_armed: bool,
+    /// Row inserted for a new key, hidden while that editor is still open.
+    preview_node: Option<usize>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SavePhase {
+    Idle,
+    Saving,
+    Saved,
+    Failed,
+}
+
+#[derive(Clone)]
+struct FailedSave {
+    path: PathBuf,
+    text: String,
 }
 
 enum Overlay {
@@ -189,7 +208,15 @@ pub struct EnvyApp {
     text_session_before: Option<EnvDocument>,
     /// Bumped whenever a plain-text edit should wait again before writing.
     text_save_gen: u64,
-    /// Bumped so a stale "Saved." timer cannot clear a newer message.
+    /// Bumped whenever a cell edit should wait again before writing.
+    cell_save_gen: u64,
+    /// Bumped when the cell editor is replaced, so a late blur cannot commit the next one.
+    edit_gen: u64,
+    save_phase: SavePhase,
+    save_failed: Option<FailedSave>,
+    /// A save job is on the background executor right now.
+    save_active: bool,
+    /// Bumped so a stale "Saved" timer cannot clear a newer one.
     saved_flash: u64,
     reload_keep_cursor: bool,
     diff_open: bool,
@@ -244,7 +271,6 @@ enum ScanMsg {
 enum IoJob {
     Save {
         seq: u64,
-        epoch: u64,
         path: PathBuf,
         text: String,
     },
@@ -324,6 +350,11 @@ impl EnvyApp {
             text_editor_needs_sync: false,
             text_session_before: None,
             text_save_gen: 0,
+            cell_save_gen: 0,
+            edit_gen: 0,
+            save_phase: SavePhase::Idle,
+            save_failed: None,
+            save_active: false,
             saved_flash: 0,
             reload_keep_cursor: false,
             diff_open: false,
@@ -1420,14 +1451,16 @@ impl EnvyApp {
             self.text_editor_needs_sync = true;
             return;
         };
+        self.commit_cell_if_open(cx);
         if self.open.as_ref().is_some_and(|open| open.path == path) {
             return;
         }
         self.finalize_text_session();
         self.text_save_gen = self.text_save_gen.wrapping_add(1);
+        self.cell_save_gen = self.cell_save_gen.wrapping_add(1);
         if let Some(open) = self.open.as_ref() {
             if open.is_dirty() {
-                self.queue_save(true, cx);
+                self.queue_save(cx);
             }
         }
         self.io_epoch = self.io_epoch.wrapping_add(1);
@@ -1438,29 +1471,36 @@ impl EnvyApp {
     }
 
     fn enqueue_save(&mut self, cx: &mut Context<Self>) {
-        self.queue_save(false, cx);
+        self.queue_save(cx);
     }
 
-    /// `force` writes even while a disk-change banner is up (leaving the file,
-    /// closing the window, or keeping this copy).
-    fn queue_save(&mut self, force: bool, cx: &mut Context<Self>) {
+    /// Write the open document. A disk-change notice does not block it:
+    /// an edit the user made is written, and a failure stays on screen.
+    fn queue_save(&mut self, cx: &mut Context<Self>) {
         let Some(open) = &self.open else {
             return;
         };
         if !open.is_dirty() {
+            if self.save_phase == SavePhase::Failed && self.save_failed.is_none() {
+                self.save_phase = SavePhase::Idle;
+            }
             return;
         }
-        if !force && open.external_change {
-            return;
-        }
+        let text = open.document.serialize();
+        let path = open.path.clone();
+        self.queue_save_text(path, text, cx);
+    }
+
+    fn queue_save_text(&mut self, path: PathBuf, text: String, cx: &mut Context<Self>) {
         self.save_seq = self.save_seq.wrapping_add(1);
+        self.save_phase = SavePhase::Saving;
         self.io_queue.push_back(IoJob::Save {
             seq: self.save_seq,
-            epoch: self.io_epoch,
-            path: open.path.clone(),
-            text: open.document.serialize(),
+            path,
+            text,
         });
         self.pump_io(cx);
+        cx.notify();
     }
 
     fn pump_io(&mut self, cx: &mut Context<Self>) {
@@ -1470,6 +1510,7 @@ impl EnvyApp {
         let Some(job) = self.io_queue.pop_front() else {
             return;
         };
+        self.save_active = matches!(job, IoJob::Save { .. });
         self.io_running = true;
         cx.notify();
         cx.spawn(async move |this, async_cx| {
@@ -1487,27 +1528,44 @@ impl EnvyApp {
     }
 
     fn apply_io(&mut self, done: IoDone, cx: &mut Context<Self>) {
+        self.save_active = false;
         match done {
             IoDone::Saved {
                 seq,
-                epoch,
                 path,
                 text,
                 result,
             } => match result {
                 Ok(mtime) => {
-                    if self.save_seq == seq && self.io_epoch == epoch {
+                    let same = self
+                        .open
+                        .as_ref()
+                        .is_some_and(|open| open.path == path && open.document.serialize() == text);
+                    if same {
                         if let Some(open) = self.open.as_mut() {
-                            if open.path == path {
-                                open.note_saved(text, mtime);
-                            }
+                            open.note_saved(text.clone(), mtime);
                         }
-                        self.note_quiet_saved(cx);
                     }
+                    if self
+                        .save_failed
+                        .as_ref()
+                        .is_some_and(|failed| failed.path == path)
+                    {
+                        self.save_failed = None;
+                    }
+                    self.settle_after_save(seq, cx);
                 }
-                Err(err) => {
-                    self.status = format!("Save failed: {err}");
-                    self.io_queue.retain(|job| !matches!(job, IoJob::Quit));
+                Err(_) => {
+                    let newer_queued = self.io_queue.iter().any(
+                        |job| matches!(job, IoJob::Save { path: queued, .. } if queued == &path),
+                    );
+                    if !newer_queued {
+                        self.save_failed = Some(FailedSave { path, text });
+                        self.save_phase = SavePhase::Failed;
+                        self.saved_flash = self.saved_flash.wrapping_add(1);
+                        self.io_queue
+                            .retain(|job| !matches!(job, IoJob::Load { .. } | IoJob::Quit));
+                    }
                 }
             },
             IoDone::Loaded {
@@ -1591,6 +1649,14 @@ impl EnvyApp {
 
     fn schedule_disk_check(&mut self, cx: &mut Context<Self>) {
         if self.disk_check || self.last_disk.elapsed() < Duration::from_millis(300) {
+            return;
+        }
+        if self.save_active
+            || self
+                .io_queue
+                .iter()
+                .any(|job| matches!(job, IoJob::Save { .. }))
+        {
             return;
         }
         let Some(open) = &self.open else {
@@ -1852,8 +1918,40 @@ impl EnvyApp {
     }
 
     fn close_editor(&mut self) {
+        if self.editor.is_some() {
+            self.edit_gen = self.edit_gen.wrapping_add(1);
+        }
         self.editor = None;
         self.edit_subs.clear();
+    }
+
+    fn cell_fields_focused(&self, window: &Window, cx: &App) -> bool {
+        let Some(editor) = &self.editor else {
+            return false;
+        };
+        editor.value.focus_handle(cx).is_focused(window)
+            || editor
+                .key
+                .as_ref()
+                .is_some_and(|key| key.focus_handle(cx).is_focused(window))
+    }
+
+    fn on_cell_blur(&mut self, gen: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.edit_gen != gen || self.editor.is_none() {
+            return;
+        }
+        if self.cell_fields_focused(window, cx) {
+            return;
+        }
+        self.commit_editor(None, false, window, cx);
+    }
+
+    fn on_cell_change(&mut self, cx: &mut Context<Self>) {
+        if self.sync_cell_preview(false, cx) {
+            self.touch_edit();
+            self.schedule_cell_save(cx);
+            cx.notify();
+        }
     }
 
     fn close_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1865,10 +1963,21 @@ impl EnvyApp {
     /// Save if needed, then quit. Returns false while a save is still running
     /// so the window stays up until the write finishes.
     pub fn close_requested(&mut self, cx: &mut Context<Self>) -> bool {
+        self.commit_cell_if_open(cx);
         self.finalize_text_session();
         self.text_save_gen = self.text_save_gen.wrapping_add(1);
+        self.cell_save_gen = self.cell_save_gen.wrapping_add(1);
         if self.open.as_ref().is_some_and(|open| open.is_dirty()) {
-            self.queue_save(true, cx);
+            self.queue_save(cx);
+            self.io_queue.push_back(IoJob::Quit);
+            self.pump_io(cx);
+            false
+        } else if self.save_active
+            || self
+                .io_queue
+                .iter()
+                .any(|job| matches!(job, IoJob::Save { .. }))
+        {
             self.io_queue.push_back(IoJob::Quit);
             self.pump_io(cx);
             false
@@ -1879,13 +1988,24 @@ impl EnvyApp {
     }
 
     fn save_open(&mut self, cx: &mut Context<Self>) {
+        self.commit_cell_if_open(cx);
         self.finalize_text_session();
         self.text_save_gen = self.text_save_gen.wrapping_add(1);
-        self.queue_save(true, cx);
+        self.cell_save_gen = self.cell_save_gen.wrapping_add(1);
+        self.queue_save(cx);
         cx.notify();
     }
 
     fn mark_edited(&mut self, cx: &mut Context<Self>) {
+        self.touch_edit();
+        if self.editor_view == EditorView::Text {
+            self.schedule_text_save(cx);
+        } else {
+            self.enqueue_save(cx);
+        }
+    }
+
+    fn touch_edit(&mut self) {
         self.io_epoch = self.io_epoch.wrapping_add(1);
         self.io_queue
             .retain(|job| !matches!(job, IoJob::Load { .. }));
@@ -1894,14 +2014,9 @@ impl EnvyApp {
             self.text_editor_needs_sync = true;
         }
         self.sync_keys();
-        if self.status == "Saved." {
-            self.status.clear();
+        if self.save_phase == SavePhase::Saved {
+            self.save_phase = SavePhase::Idle;
             self.saved_flash = self.saved_flash.wrapping_add(1);
-        }
-        if self.editor_view == EditorView::Text {
-            self.schedule_text_save(cx);
-        } else {
-            self.enqueue_save(cx);
         }
     }
 
@@ -1909,7 +2024,7 @@ impl EnvyApp {
         self.text_save_gen = self.text_save_gen.wrapping_add(1);
         let gen = self.text_save_gen;
         cx.spawn(async move |this, async_cx| {
-            async_cx.background_executor().timer(TEXT_SAVE_AFTER).await;
+            async_cx.background_executor().timer(SAVE_PAUSE).await;
             let _ = this.update(async_cx, |view, cx| {
                 if view.text_save_gen != gen || view.editor_view != EditorView::Text {
                     return;
@@ -1920,11 +2035,29 @@ impl EnvyApp {
         .detach();
     }
 
-    fn note_quiet_saved(&mut self, cx: &mut Context<Self>) {
-        if !(self.status.is_empty() || self.status == "Saving…" || self.status == "Saved.") {
-            return;
-        }
-        self.status = "Saved.".into();
+    fn schedule_cell_save(&mut self, cx: &mut Context<Self>) {
+        self.cell_save_gen = self.cell_save_gen.wrapping_add(1);
+        let gen = self.cell_save_gen;
+        cx.spawn(async move |this, async_cx| {
+            async_cx.background_executor().timer(SAVE_PAUSE).await;
+            let _ = this.update(async_cx, |view, cx| {
+                if view.cell_save_gen != gen || view.editor.is_none() {
+                    return;
+                }
+                view.queue_save(cx);
+            });
+        })
+        .detach();
+    }
+
+    fn flush_save(&mut self, cx: &mut Context<Self>) {
+        self.text_save_gen = self.text_save_gen.wrapping_add(1);
+        self.cell_save_gen = self.cell_save_gen.wrapping_add(1);
+        self.queue_save(cx);
+    }
+
+    fn show_saved(&mut self, cx: &mut Context<Self>) {
+        self.save_phase = SavePhase::Saved;
         self.saved_flash = self.saved_flash.wrapping_add(1);
         let token = self.saved_flash;
         cx.spawn(async move |this, async_cx| {
@@ -1933,13 +2066,51 @@ impl EnvyApp {
                 .timer(SAVED_FLASH_AFTER)
                 .await;
             let _ = this.update(async_cx, |view, cx| {
-                if view.saved_flash == token && view.status == "Saved." {
-                    view.status.clear();
+                if view.saved_flash == token && view.save_phase == SavePhase::Saved {
+                    view.save_phase = SavePhase::Idle;
                     cx.notify();
                 }
             });
         })
         .detach();
+        cx.notify();
+    }
+
+    fn settle_after_save(&mut self, seq: u64, cx: &mut Context<Self>) {
+        if seq != self.save_seq {
+            return;
+        }
+        if self.open.as_ref().is_some_and(|open| open.is_dirty()) {
+            let path = self
+                .open
+                .as_ref()
+                .map(|open| open.path.clone())
+                .unwrap_or_default();
+            let queued = self
+                .io_queue
+                .iter()
+                .any(|job| matches!(job, IoJob::Save { path: queued, .. } if queued == &path));
+            if !queued {
+                self.queue_save(cx);
+            }
+            return;
+        }
+        if self.save_failed.is_none() {
+            self.show_saved(cx);
+        }
+    }
+
+    fn retry_save(&mut self, cx: &mut Context<Self>) {
+        if self.open.as_ref().is_some_and(|open| open.is_dirty()) {
+            self.queue_save(cx);
+            return;
+        }
+        let Some(failed) = self.save_failed.clone() else {
+            self.save_phase = SavePhase::Idle;
+            cx.notify();
+            return;
+        };
+        self.queue_save_text(failed.path, failed.text, cx);
     }
 
     fn finalize_text_session(&mut self) {
@@ -1974,7 +2145,7 @@ impl EnvyApp {
             cx.notify();
             return;
         }
-        self.close_editor();
+        self.commit_cell_if_open(cx);
         if self.diff_open {
             self.clear_compare();
         }
@@ -2310,7 +2481,7 @@ impl EnvyApp {
             return;
         }
         if self.editor.is_some() {
-            self.close_editor();
+            self.commit_cell_if_open(cx);
             self.focus_self(window, cx);
             cx.notify();
             return;
@@ -2344,7 +2515,7 @@ impl EnvyApp {
                 open.dismiss_external();
             }
             self.status = "Keeping your copy.".into();
-            self.queue_save(true, cx);
+            self.queue_save(cx);
             cx.notify();
             return;
         }
@@ -2457,7 +2628,7 @@ impl EnvyApp {
             }
             self.commit_editor(None, false, window, cx);
         } else {
-            self.close_editor();
+            self.finish_cell(true, cx);
         }
         if let Some(row) = route.focus_row {
             self.cursor = row.min(len.saturating_sub(1));
@@ -2492,11 +2663,7 @@ impl EnvyApp {
     ) {
         let key_focused = self.key_editor_focused(window, cx);
         match motion {
-            CellMotion::Cancel => {
-                self.close_editor();
-                self.focus_self(window, cx);
-                cx.notify();
-            }
+            CellMotion::Cancel => self.cancel_cell_edit(window, cx),
             CellMotion::PrevCell if !key_focused => self.hold_key_editor(true, window, cx),
             CellMotion::PrevCell => self.hold_key_editor(false, window, cx),
             CellMotion::NextCell if key_focused => {
@@ -2679,7 +2846,14 @@ impl EnvyApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.close_editor();
+        if self.editor.is_some() {
+            self.commit_cell_if_open(cx);
+        }
+        let baseline = self
+            .open
+            .as_ref()
+            .map(|open| open.document.clone())
+            .unwrap_or_default();
         let initial_query = key.clone().unwrap_or_default();
         let key_input = key.map(|text| cx.new(|cx| TextInput::new("KEY", cx).with_text(text)));
         let value_text = value.unwrap_or_default();
@@ -2692,23 +2866,41 @@ impl EnvyApp {
                     TextInputEvent::Change => {
                         let query = input.read(cx).value().to_string();
                         this.refresh_editor_suggestions(&query);
+                        this.on_cell_change(cx);
                         cx.notify();
                     }
                     // The field binding takes Enter before the window does.
                     TextInputEvent::Submit => {
                         this.apply_cell_motion(CellMotion::NextRow, window, cx);
                     }
-                    TextInputEvent::ExitDown => {}
-                    TextInputEvent::Focus | TextInputEvent::Blur => {}
+                    TextInputEvent::Blur => {
+                        let gen = this.edit_gen;
+                        cx.defer_in(window, move |this, window, cx| {
+                            this.on_cell_blur(gen, window, cx);
+                        });
+                    }
+                    TextInputEvent::ExitDown | TextInputEvent::Focus => {}
                 },
             ));
         }
         self.edit_subs.push(
-            cx.subscribe_in(&value_input, window, |this, _, event, window, cx| {
-                if let TextInputEvent::Submit = event {
-                    this.apply_cell_motion(CellMotion::NextRow, window, cx);
-                }
-            }),
+            cx.subscribe_in(
+                &value_input,
+                window,
+                |this, _, event, window, cx| match event {
+                    TextInputEvent::Submit => {
+                        this.apply_cell_motion(CellMotion::NextRow, window, cx);
+                    }
+                    TextInputEvent::Change => this.on_cell_change(cx),
+                    TextInputEvent::Blur => {
+                        let gen = this.edit_gen;
+                        cx.defer_in(window, move |this, window, cx| {
+                            this.on_cell_blur(gen, window, cx);
+                        });
+                    }
+                    TextInputEvent::Focus | TextInputEvent::ExitDown => {}
+                },
+            ),
         );
         let focus_key = key_input.is_some() && !matches!(kind, EditKind::Value);
         self.editor = Some(Editor {
@@ -2718,6 +2910,9 @@ impl EnvyApp {
             kind,
             suggestions: Vec::new(),
             suggestions_open: false,
+            baseline,
+            undo_armed: false,
+            preview_node: None,
         });
         if focus_key {
             self.refresh_editor_suggestions(&initial_query);
@@ -2735,21 +2930,40 @@ impl EnvyApp {
         }
     }
 
-    fn commit_editor_key(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
-        let node = self.editor.as_ref().and_then(|editor| editor.node);
-        self.close_editor();
-        self.write_key(node, key, cx);
-        self.focus_self(window, cx);
-        cx.notify();
+    fn commit_editor_key(&mut self, _key: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_editor(None, true, window, cx);
     }
 
     fn commit_editor(
         &mut self,
-        value_text: Option<String>,
+        _value_text: Option<String>,
         restore_focus: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.finish_cell(false, cx);
+        if restore_focus {
+            self.focus_self(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn commit_cell_if_open(&mut self, cx: &mut Context<Self>) {
+        if self.editor.is_none() {
+            return;
+        }
+        self.finish_cell(false, cx);
+    }
+
+    fn cancel_cell_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_cell(true, cx);
+        self.focus_self(window, cx);
+        cx.notify();
+    }
+
+    /// Apply the open cell, or put the document back when `cancel` is set,
+    /// then write immediately.
+    fn finish_cell(&mut self, cancel: bool, cx: &mut Context<Self>) {
         let Some(editor) = self.editor.as_ref() else {
             return;
         };
@@ -2758,114 +2972,182 @@ impl EnvyApp {
         let key_text = editor
             .key
             .as_ref()
-            .map(|input| input.read(cx).value().to_string());
-        let value_text = value_text.unwrap_or_else(|| {
-            self.editor
-                .as_ref()
-                .map(|editor| editor.value.read(cx).value().to_string())
-                .unwrap_or_default()
-        });
-        self.close_editor();
-        match kind {
-            EditTag::Value => self.write_value(node, value_text, cx),
-            EditTag::Rename => self.write_key(node, key_text.unwrap_or_default(), cx),
-            EditTag::New => self.write_new(key_text.unwrap_or_default(), value_text, cx),
-        }
-        if restore_focus {
-            self.focus_self(window, cx);
-        }
-        cx.notify();
-    }
-
-    fn write_value(&mut self, node: Option<usize>, value: String, cx: &mut Context<Self>) {
-        let Some(node) = node else {
-            return;
-        };
-        let unchanged = self
-            .open
-            .as_ref()
-            .and_then(|open| match open.document.nodes.get(node) {
-                Some(Node::Entry(entry)) => Some(entry.value == value),
-                _ => None,
-            });
-        if unchanged == Some(true) {
-            return;
-        }
-        let Some(open) = self.open.as_mut() else {
-            return;
-        };
-        open.mutate(|document| {
-            if let Some(Node::Entry(entry)) = document.nodes.get_mut(node) {
-                entry.set_value(value);
+            .map(|input| input.read(cx).value().trim().to_string())
+            .unwrap_or_default();
+        let baseline = editor.baseline.clone();
+        let armed = editor.undo_armed;
+        let before = baseline.serialize();
+        if cancel {
+            self.close_editor();
+            if let Some(open) = self.open.as_mut() {
+                open.restore_baseline(baseline, armed);
             }
-        });
-        self.mark_edited(cx);
-    }
-
-    fn write_key(&mut self, node: Option<usize>, key: String, cx: &mut Context<Self>) {
-        let key = key.trim().to_string();
-        if !is_env_key(&key) {
-            self.status = "Keys start with a letter or underscore.".into();
-            return;
-        }
-        let Some(node) = node else {
-            return;
-        };
-        let taken = self.open.as_ref().is_some_and(|open| {
-            open.document
-                .entries()
-                .any(|(index, entry)| index != node && entry.key == key)
-        });
-        if taken {
-            self.status = format!("{key} is already in this file.");
-            return;
-        }
-        let unchanged = self.open.as_ref().is_some_and(|open| {
-            matches!(open.document.nodes.get(node), Some(Node::Entry(entry)) if entry.key == key)
-        });
-        if unchanged {
-            return;
-        }
-        let Some(open) = self.open.as_mut() else {
-            return;
-        };
-        open.mutate(|document| {
-            if let Some(Node::Entry(entry)) = document.nodes.get_mut(node) {
-                entry.set_key(&key);
-            }
-        });
-        self.mark_edited(cx);
-        self.jump_to_key(&key);
-        self.status = format!("Renamed to {key}.");
-    }
-
-    fn write_new(&mut self, key: String, value: String, cx: &mut Context<Self>) {
-        let key = key.trim().to_string();
-        if !is_env_key(&key) {
-            self.status = "Keys start with a letter or underscore.".into();
-            return;
-        }
-        let exists = self
-            .open
-            .as_ref()
-            .is_some_and(|open| open.document.contains_key(&key));
-        let Some(open) = self.open.as_mut() else {
-            return;
-        };
-        open.mutate(|document| {
-            if exists {
-                document.set_value(&key, &value);
-            } else {
-                document.push_entry(key.clone(), value);
-            }
-        });
-        self.mark_edited(cx);
-        self.jump_to_key(&key);
-        self.status = if exists {
-            format!("Updated {key}.")
         } else {
-            format!("Added {key}.")
+            self.sync_cell_preview(true, cx);
+            let changed = self
+                .open
+                .as_ref()
+                .is_some_and(|open| open.document.serialize() != before);
+            let existed = baseline.contains_key(&key_text);
+            let taken = matches!(kind, EditTag::Rename)
+                && is_env_key(&key_text)
+                && baseline
+                    .entries()
+                    .any(|(index, entry)| node != Some(index) && entry.key == key_text);
+            if taken {
+                self.status = format!("{key_text} is already in this file.");
+            }
+            self.close_editor();
+            if changed {
+                match kind {
+                    EditTag::Rename => {
+                        self.jump_to_key(&key_text);
+                        self.status = format!("Renamed to {key_text}.");
+                    }
+                    EditTag::New => {
+                        self.jump_to_key(&key_text);
+                        self.status = if existed {
+                            format!("Updated {key_text}.")
+                        } else {
+                            format!("Added {key_text}.")
+                        };
+                    }
+                    EditTag::Value => {}
+                }
+            }
+        }
+        self.touch_edit();
+        self.flush_save(cx);
+    }
+
+    /// Fold the open cell into the document. Returns true when the bytes changed.
+    fn sync_cell_preview(&mut self, allow_existing: bool, cx: &mut Context<Self>) -> bool {
+        let Some(projected) = self.projected_cell(allow_existing, cx) else {
+            return self.revert_cell_preview();
         };
+        let same = self
+            .open
+            .as_ref()
+            .is_some_and(|open| open.document.serialize() == projected.serialize());
+        if same {
+            return false;
+        }
+        let kind = self.editor.as_ref().map(|editor| editor.kind_tag());
+        let key_text = self
+            .editor
+            .as_ref()
+            .and_then(|editor| editor.key.as_ref())
+            .map(|input| input.read(cx).value().trim().to_string())
+            .unwrap_or_default();
+        let preview_node = if matches!(kind, Some(EditTag::New)) {
+            projected
+                .entries()
+                .filter(|(_, entry)| entry.key == key_text)
+                .map(|(index, _)| index)
+                .last()
+        } else {
+            self.editor.as_ref().and_then(|editor| editor.node)
+        };
+        let armed = self.editor.as_ref().is_some_and(|editor| editor.undo_armed);
+        let Some(open) = self.open.as_mut() else {
+            return false;
+        };
+        if !armed {
+            open.arm_undo();
+        }
+        open.document = projected;
+        if let Some(editor) = self.editor.as_mut() {
+            editor.undo_armed = true;
+            editor.preview_node = preview_node;
+        }
+        true
+    }
+
+    fn revert_cell_preview(&mut self) -> bool {
+        let Some(editor) = self.editor.as_ref() else {
+            return false;
+        };
+        if !editor.undo_armed {
+            return false;
+        }
+        let baseline = editor.baseline.clone();
+        let Some(open) = self.open.as_mut() else {
+            return false;
+        };
+        let changed = open.document.serialize() != baseline.serialize();
+        open.restore_baseline(baseline, true);
+        if let Some(editor) = self.editor.as_mut() {
+            editor.undo_armed = false;
+            editor.preview_node = None;
+        }
+        changed
+    }
+
+    fn projected_cell(&self, allow_existing: bool, cx: &App) -> Option<EnvDocument> {
+        let editor = self.editor.as_ref()?;
+        let mut doc = editor.baseline.clone();
+        let value = editor.value.read(cx).value().to_string();
+        match editor.kind_tag() {
+            EditTag::Value => {
+                let node = editor.node?;
+                let unchanged = matches!(
+                    doc.nodes.get(node),
+                    Some(Node::Entry(entry)) if entry.value == value
+                );
+                if unchanged {
+                    return None;
+                }
+                if let Some(Node::Entry(entry)) = doc.nodes.get_mut(node) {
+                    entry.set_value(value);
+                }
+                Some(doc)
+            }
+            EditTag::Rename => {
+                let key = editor
+                    .key
+                    .as_ref()
+                    .map(|input| input.read(cx).value().trim().to_string())
+                    .unwrap_or_default();
+                let node = editor.node?;
+                if !is_env_key(&key) {
+                    return None;
+                }
+                if doc
+                    .entries()
+                    .any(|(index, entry)| index != node && entry.key == key)
+                {
+                    return None;
+                }
+                let unchanged =
+                    matches!(doc.nodes.get(node), Some(Node::Entry(entry)) if entry.key == key);
+                if unchanged {
+                    return None;
+                }
+                if let Some(Node::Entry(entry)) = doc.nodes.get_mut(node) {
+                    entry.set_key(&key);
+                }
+                Some(doc)
+            }
+            EditTag::New => {
+                let key = editor
+                    .key
+                    .as_ref()
+                    .map(|input| input.read(cx).value().trim().to_string())
+                    .unwrap_or_default();
+                if !is_env_key(&key) {
+                    return None;
+                }
+                if doc.contains_key(&key) {
+                    if !allow_existing {
+                        return None;
+                    }
+                    doc.set_value(&key, &value);
+                } else {
+                    doc.push_entry(key, value);
+                }
+                Some(doc)
+            }
+        }
     }
 
     fn copy_selected(&mut self, cx: &mut Context<Self>) {
@@ -2979,6 +3261,7 @@ impl EnvyApp {
     }
 
     fn toggle_disabled_node(&mut self, node: usize, cx: &mut Context<Self>) {
+        self.commit_cell_if_open(cx);
         let key = match self
             .open
             .as_ref()
@@ -3018,6 +3301,7 @@ impl EnvyApp {
         if self.list_keys_blocked() {
             return;
         }
+        self.commit_cell_if_open(cx);
         let Some(node) = self.selected_node() else {
             return;
         };
@@ -3043,6 +3327,7 @@ impl EnvyApp {
     }
 
     fn undo(&mut self, cx: &mut Context<Self>) {
+        self.commit_cell_if_open(cx);
         self.finalize_text_session();
         let Some(open) = self.open.as_mut() else {
             return;
@@ -3062,6 +3347,7 @@ impl EnvyApp {
     }
 
     fn redo(&mut self, cx: &mut Context<Self>) {
+        self.commit_cell_if_open(cx);
         self.finalize_text_session();
         let Some(open) = self.open.as_mut() else {
             return;
@@ -3517,7 +3803,7 @@ impl EnvyApp {
             return;
         }
         self.close_file_prompt();
-        self.close_editor();
+        self.commit_cell_if_open(cx);
         self.tab_menu = Some(TabMenu { file_ix, cursor: 0 });
         self.zone = Zone::Tabs;
         self.tab_cursor = file_ix;
@@ -3641,6 +3927,7 @@ impl EnvyApp {
     }
 
     fn duplicate_tab(&mut self, file_ix: usize, cx: &mut Context<Self>) {
+        self.commit_cell_if_open(cx);
         let Some(path) = self
             .project_ix
             .and_then(|ix| self.projects.get(ix))
@@ -3935,6 +4222,7 @@ impl EnvyApp {
     }
 
     fn apply_overlay_paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_cell_if_open(cx);
         let Overlay::Paste(plan) = &self.overlay else {
             return;
         };
@@ -4926,6 +5214,16 @@ impl EnvyApp {
             if file.missing_vs_example {
                 tip_parts.push("Missing keys vs .env.example".into());
             }
+            let unsaved = self.open.as_ref().is_some_and(|open| {
+                open.path == file.path
+                    && (open.is_dirty()
+                        || self.save_failed.as_ref().is_some_and(|failed| {
+                            failed.path == file.path && self.save_phase == SavePhase::Failed
+                        }))
+            });
+            if unsaved {
+                tip_parts.push("Unsaved".into());
+            }
             if can_compare && !self.diff_open && file_ix != Some(index) {
                 tip_parts.push("Ctrl+click to compare".into());
             }
@@ -5022,12 +5320,12 @@ impl EnvyApp {
 
             tab = tab.child(file_title(&name, &suffix, p));
 
-            if file.missing_vs_example {
+            if unsaved {
                 tab = tab.child(
                     div()
-                        .size(px(5.))
+                        .size(px(TAB_DOT_PX))
                         .rounded(px(999.))
-                        .bg(p.warning_dot.opacity(0.65))
+                        .bg(p.accent)
                         .flex_shrink_0(),
                 );
             }
@@ -5641,6 +5939,11 @@ impl EnvyApp {
                     entry_row_ix += 1;
 
                     let node = *node_index;
+                    if editing_new
+                        && self.editor.as_ref().and_then(|editor| editor.preview_node) == Some(node)
+                    {
+                        continue;
+                    }
                     let key = entry.key.clone();
                     let value = entry.value.clone();
                     let exported = entry.exported;
@@ -6354,6 +6657,61 @@ impl EnvyApp {
         (short, full)
     }
 
+    fn render_save_status(&self, p: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        match self.save_phase {
+            SavePhase::Idle => None,
+            SavePhase::Saving => Some(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(11.5))
+                    .line_height(px(16.))
+                    .text_color(p.fg_tertiary)
+                    .child("Saving…")
+                    .into_any_element(),
+            ),
+            SavePhase::Saved => Some(
+                h_flex()
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap(px(4.))
+                    .text_color(p.fg_secondary)
+                    .child(Icon::new(IconName::Check).size(px(12.)))
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .line_height(px(16.))
+                            .child("Saved"),
+                    )
+                    .into_any_element(),
+            ),
+            SavePhase::Failed => {
+                let entity = cx.entity();
+                Some(
+                    div()
+                        .id("save-retry")
+                        .flex_shrink_0()
+                        .px(px(6.))
+                        .py(px(1.))
+                        .rounded(px(4.))
+                        .bg(p.warning_bg)
+                        .border_1()
+                        .border_color(p.warning_border)
+                        .text_size(px(11.5))
+                        .line_height(px(16.))
+                        .text_color(p.warning)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(p.warning_border))
+                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                            cx.stop_propagation();
+                            entity.update(cx, |this, cx| this.retry_save(cx));
+                        })
+                        .child("Couldn't save – Retry")
+                        .into_any_element(),
+                )
+            }
+        }
+    }
+
     fn render_footer(
         &self,
         p: Palette,
@@ -6369,6 +6727,9 @@ impl EnvyApp {
             .unwrap_or(0);
 
         let mut left = h_flex().flex_1().min_w(px(0.)).items_center().gap(px(8.));
+        if let Some(save) = self.render_save_status(p, cx) {
+            left = left.child(save);
+        }
         if !status.is_empty() {
             left = left.child(
                 div()
@@ -7828,6 +8189,7 @@ impl EnvyApp {
         };
         let onto_open = self.open.as_ref().is_some_and(|open| open.path == path);
         if onto_open {
+            self.commit_cell_if_open(cx);
             let Some(open) = self.open.as_mut() else {
                 return;
             };
@@ -7867,13 +8229,7 @@ impl EnvyApp {
     }
 
     fn save_other(&mut self, path: PathBuf, text: String, cx: &mut Context<Self>) {
-        self.io_queue.push_back(IoJob::Save {
-            seq: u64::MAX,
-            epoch: self.io_epoch,
-            path,
-            text,
-        });
-        self.pump_io(cx);
+        self.queue_save_text(path, text, cx);
     }
 
     fn unreadable_panel(
@@ -8090,7 +8446,6 @@ const SHORTCUTS: &[(&str, &str)] = &[
 enum IoDone {
     Saved {
         seq: u64,
-        epoch: u64,
         path: PathBuf,
         text: String,
         result: std::io::Result<Option<std::time::SystemTime>>,
@@ -8113,16 +8468,10 @@ enum IoDone {
 
 fn run_io(job: IoJob) -> IoDone {
     match job {
-        IoJob::Save {
-            seq,
-            epoch,
-            path,
-            text,
-        } => {
+        IoJob::Save { seq, path, text } => {
             let result = save_text(&path, &text);
             IoDone::Saved {
                 seq,
-                epoch,
                 path,
                 text,
                 result,

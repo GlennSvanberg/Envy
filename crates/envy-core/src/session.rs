@@ -9,12 +9,16 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use crate::document::EnvDocument;
 use crate::paste::{self, PastePlan};
 
 const UNDO_LIMIT: usize = 100;
+
+/// How long typing waits before the file is written. Enter, Tab, blur,
+/// a click outside, a file or project change, and quitting do not wait.
+pub const SAVE_PAUSE: Duration = Duration::from_millis(300);
 
 #[derive(Clone, Debug)]
 pub struct OpenFile {
@@ -241,6 +245,25 @@ impl OpenFile {
         if self.undo.len() > UNDO_LIMIT {
             self.undo.remove(0);
         }
+    }
+
+    /// Remember the document once, at the start of a cell edit.
+    pub fn arm_undo(&mut self) {
+        self.push_undo();
+        self.redo.clear();
+    }
+
+    /// Drop an in-progress cell edit. `armed` means [`Self::arm_undo`] ran.
+    pub fn restore_baseline(&mut self, baseline: EnvDocument, armed: bool) {
+        if armed
+            && self
+                .undo
+                .last()
+                .is_some_and(|doc| doc.serialize() == baseline.serialize())
+        {
+            self.undo.pop();
+        }
+        self.document = baseline;
     }
 }
 
@@ -494,4 +517,198 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn typing_waits_three_hundred_milliseconds() {
+        assert_eq!(SAVE_PAUSE, Duration::from_millis(300));
+    }
+
+    #[test]
+    fn editing_a_value_cell_changes_the_file_on_disk() {
+        use crate::document::Node;
+
+        let dir = scratch();
+        let path = dir.join(".env");
+        fs::write(&path, "TOKEN=old\nKEEP=1\n").unwrap();
+        let mut open = OpenFile::load(&path).unwrap();
+        open.mutate(|document| {
+            document.set_value("TOKEN", "new");
+        });
+        open.save().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "TOKEN=new\nKEEP=1\n");
+        assert!(!open.is_dirty());
+        assert!(!temp_sibling(&path).exists());
+
+        open.mutate(|document| {
+            if let Some(Node::Entry(entry)) = document
+                .nodes
+                .iter_mut()
+                .find(|node| matches!(node, Node::Entry(entry) if entry.key == "TOKEN"))
+            {
+                entry.set_key("TOKEN2");
+            }
+        });
+        open.save().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "TOKEN2=new\nKEEP=1\n");
+
+        open.mutate(|document| {
+            document.push_entry("ADDED", "yes");
+        });
+        open.save().unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "TOKEN2=new\nKEEP=1\nADDED=yes\n"
+        );
+        assert!(!temp_sibling(&path).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editing_a_crlf_value_keeps_crlf_on_disk() {
+        let dir = scratch();
+        let path = dir.join(".env");
+        fs::write(&path, "TOKEN=old\r\nKEEP=1\r\n").unwrap();
+        let mut open = OpenFile::load(&path).unwrap();
+        open.mutate(|document| {
+            document.set_value("TOKEN", "new");
+        });
+        open.save().unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "TOKEN=new\r\nKEEP=1\r\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cancel_after_a_preview_writes_the_original_back() {
+        let dir = scratch();
+        let path = dir.join(".env");
+        fs::write(&path, "TOKEN=old\n").unwrap();
+        let mut open = OpenFile::load(&path).unwrap();
+        let baseline = open.document.clone();
+        open.arm_undo();
+        let mut preview = baseline.clone();
+        preview.set_value("TOKEN", "typing");
+        open.document = preview;
+        open.save().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "TOKEN=typing\n");
+        open.restore_baseline(baseline, true);
+        assert!(open.is_dirty());
+        open.save().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "TOKEN=old\n");
+        assert!(!open.is_dirty());
+        assert!(!open.can_undo());
+        assert!(!open.can_redo());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_save_keeps_the_original_and_returns_the_error() {
+        let dir = scratch();
+        let path = dir.join(".env");
+        fs::write(&path, "TOKEN=old\n").unwrap();
+        let mut open = OpenFile::load(&path).unwrap();
+        open.mutate(|document| {
+            document.set_value("TOKEN", "new");
+        });
+        let _guard = DirMode::readonly(&dir);
+        let err = open.save().unwrap_err();
+        drop(_guard);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "TOKEN=old\n");
+        assert!(!temp_sibling(&path).exists());
+        assert!(open.is_dirty());
+        let _ = err;
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verbatim_prefix_value_edit_lands_on_disk() {
+        let dir = scratch();
+        let path = dir.join(".env");
+        fs::write(&path, "TOKEN=old\r\n").unwrap();
+        let canon = fs::canonicalize(&path).unwrap();
+        assert!(
+            canon.to_string_lossy().starts_with(r"\\?\"),
+            "canonical path was {}",
+            canon.display()
+        );
+        let mut open = OpenFile::load(&canon).unwrap();
+        open.mutate(|document| {
+            document.set_value("TOKEN", "new");
+        });
+        open.save().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "TOKEN=new\r\n");
+        assert!(!temp_sibling(&canon).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_locked_file_reports_the_error_and_keeps_the_original() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const FILE_SHARE_READ: u32 = 1;
+        let dir = scratch();
+        let path = dir.join(".env");
+        fs::write(&path, "TOKEN=old\r\n").unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&path)
+            .unwrap();
+        let mut open = OpenFile::load(&path).unwrap();
+        open.mutate(|document| {
+            document.set_value("TOKEN", "new");
+        });
+        let err = open.save().unwrap_err();
+        drop(lock);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "TOKEN=old\r\n");
+        assert!(!temp_sibling(&path).exists());
+        assert!(open.is_dirty());
+        let _ = err;
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+/// Restores a directory mode even when the test fails.
+#[cfg(all(test, unix))]
+struct DirMode {
+    path: PathBuf,
+    mode: u32,
+}
+
+#[cfg(all(test, unix))]
+impl DirMode {
+    fn readonly(path: &Path) -> Self {
+        let mode = mode_of(path);
+        set_mode(path, 0o555);
+        Self {
+            path: path.to_path_buf(),
+            mode,
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for DirMode {
+    fn drop(&mut self) {
+        set_mode(&self.path, self.mode);
+    }
+}
+
+#[cfg(all(test, unix))]
+fn mode_of(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).unwrap().permissions().mode()
+}
+
+#[cfg(all(test, unix))]
+fn set_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(path).unwrap().permissions();
+    perms.set_mode(mode);
+    fs::set_permissions(path, perms).unwrap();
 }
