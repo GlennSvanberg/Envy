@@ -48,6 +48,9 @@ use gpui_kit::{
 };
 
 use crate::actions::*;
+use crate::copy_feedback::{
+    copy_icon_button, row_copy_id, CopyAck, CopyAckBook, CopyButtonKind, TOOLBAR_COPY_ID,
+};
 use crate::dotenv_highlight::DotenvHighlighter;
 use crate::hotkey_os;
 use crate::instance::Instance;
@@ -227,6 +230,8 @@ pub struct EnvyApp {
     diff_right_doc: Option<EnvDocument>,
     last_dark: Option<bool>,
     status: String,
+    /// Copy buttons that are still showing the check. Keyed by button id.
+    copy_acks: CopyAckBook,
     clear_token: u64,
     clear_task: Option<Task<()>>,
     poll_task: Option<Task<()>>,
@@ -365,6 +370,7 @@ impl EnvyApp {
             diff_right_doc: None,
             last_dark: None,
             status: "Starting".into(),
+            copy_acks: CopyAckBook::default(),
             clear_token: 0,
             clear_task: None,
             poll_task: None,
@@ -3167,6 +3173,7 @@ impl EnvyApp {
         };
         cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
         self.arm_clear(value, cx);
+        self.acknowledge_copy(&row_copy_id(node), cx);
         self.status = if self.config.settings.clear_clipboard {
             "Copied. Clipboard clears in 30s.".into()
         } else {
@@ -3190,8 +3197,34 @@ impl EnvyApp {
         }
         cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
         self.arm_clear(text, cx);
+        self.acknowledge_copy(TOOLBAR_COPY_ID, cx);
         self.status = "Copied.".into();
         cx.notify();
+    }
+
+    fn acknowledge_copy(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(file) = self.open.as_ref().map(|open| open.path.clone()) else {
+            return;
+        };
+        let generation = self.copy_acks.acknowledge(id, file);
+        let key = id.to_string();
+        cx.spawn(async move |this, async_cx| {
+            async_cx
+                .background_executor()
+                .timer(crate::copy_feedback::copy_ack_lifetime())
+                .await;
+            let _ = this.update(async_cx, |view, cx| {
+                if view.copy_acks.expire(&key, generation) {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn copy_ack(&self, id: &str) -> Option<&CopyAck> {
+        let file = self.open.as_ref()?;
+        self.copy_acks.visible(id, &file.path)
     }
 
     fn arm_clear(&mut self, value: String, cx: &mut Context<Self>) {
@@ -5611,12 +5644,13 @@ impl EnvyApp {
             .gap(px(4.))
             .flex_shrink_0()
             .child(
-                toolbar_icon_button(
-                    "tb-copy-all",
-                    IconName::Copy,
+                copy_icon_button(
+                    TOOLBAR_COPY_ID,
                     "Copy all",
-                    false,
+                    CopyButtonKind::Toolbar,
+                    self.copy_ack(TOOLBAR_COPY_ID),
                     !has_open,
+                    cx.reduce_motion(),
                     p,
                 )
                 .on_click({
@@ -5829,6 +5863,7 @@ impl EnvyApp {
         let query = self.key_query.trim().to_ascii_lowercase();
         let query_active = !query.is_empty();
         let entity = cx.entity();
+        let reduce_motion = cx.reduce_motion();
 
         let has_any_entries = !visible_layout.entry_nodes.is_empty();
         let key_w = px(self.effective_key_column());
@@ -6225,14 +6260,18 @@ impl EnvyApp {
                             .group_hover(key_group, |style| style.visible());
                     }
                     if !editing_this {
+                        let copy_id = row_copy_id(node);
                         actions = actions
                             .child(
-                                row_icon_button(
-                                    SharedString::from(format!("copy-{node}")),
-                                    IconName::Copy,
+                                copy_icon_button(
+                                    copy_id.clone(),
                                     "Copy value · C",
+                                    CopyButtonKind::Row,
+                                    self.copy_ack(&copy_id),
+                                    false,
+                                    reduce_motion,
+                                    p,
                                 )
-                                .text_color(p.fg_secondary)
                                 .on_click(move |_, _, cx| {
                                     copy_entity.update(cx, |this, cx| {
                                         this.zone = Zone::Keys;
