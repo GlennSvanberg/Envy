@@ -6,6 +6,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod actions;
+mod copy_feedback;
 mod dotenv_highlight;
 mod hotkey_os;
 mod instance;

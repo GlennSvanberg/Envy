@@ -56,6 +56,8 @@ pub struct Palette {
     pub warning_dot: Hsla,
     pub warning_bg: Hsla,
     pub warning_border: Hsla,
+    /// Quiet confirmation, used when a copy lands. Not a second brand accent.
+    pub success: Hsla,
     pub danger: Hsla,
     pub danger_bg: Hsla,
     pub danger_border: Hsla,
@@ -98,6 +100,7 @@ impl Palette {
                 warning_dot: warning,
                 warning_bg: warning.opacity(0.09),
                 warning_border: warning.opacity(0.22),
+                success: rgb(0x3FB950).into(),
                 danger: accent,
                 danger_bg: accent.opacity(0.10),
                 danger_border: accent.opacity(0.24),
@@ -137,6 +140,7 @@ impl Palette {
                 warning_dot,
                 warning_bg: warning_dot.opacity(0.09),
                 warning_border: warning_dot.opacity(0.22),
+                success: rgb(0x1A7F37).into(),
                 danger: accent,
                 danger_bg: accent.opacity(0.08),
                 danger_border: accent.opacity(0.22),
@@ -203,6 +207,7 @@ pub fn apply_palette(cx: &mut App) {
         theme.popover = p.bg_surface;
         theme.popover_foreground = p.fg_primary;
         theme.warning = p.warning_dot;
+        theme.success = p.success;
         theme.danger = p.danger;
         theme.selection = p.accent.opacity(0.24);
     });
@@ -234,5 +239,11 @@ mod tests {
         assert_ne!(light.warning, light.accent);
         assert_eq!(dark.prod_dot, dark.warning);
         assert_eq!(light.prod_dot, light.warning_dot);
+        assert_eq!(dark.success, rgb(0x3FB950).into());
+        assert_eq!(light.success, rgb(0x1A7F37).into());
+        assert_ne!(dark.success, dark.accent);
+        assert_ne!(dark.success, dark.warning);
+        assert_ne!(light.success, light.accent);
+        assert_ne!(light.success, light.warning);
     }
 }
